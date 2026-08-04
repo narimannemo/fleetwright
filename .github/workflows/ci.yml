@@ -32,11 +32,31 @@ jobs:
       - run: ruff check .
       - run: pytest -q
       - run: superagentic demo
+      - name: the dashboard renders and is self-contained
+        shell: bash
+        run: |
+          superagentic add smoke a b c --db smoke.db
+          superagentic dashboard --db smoke.db --out smoke.html
+          grep -q "superagentic" smoke.html
+          # A CDN reference here would mean the snapshot is useless offline or
+          # under a strict CSP, which is most of where it will be opened.
+          ! grep -qE '(src|href)="https?://' smoke.html
       - name: a real four-worker fleet, end to end
         shell: bash
         run: |
+          superagentic define work --db ci.db \
+            --instructions 'Process $name from $root' \
+            --done-when 'it is processed' --returns '{"ok": true}'
           python -c "print('\n'.join(f'u{i}' for i in range(40)))" > units.txt
-          superagentic add work --from-file units.txt --db ci.db
+          superagentic add work --from-file units.txt --db ci.db \
+            --meta '{"root": "/tmp/$name"}'
+          # The brief must reach a worker with the templating resolved, on
+          # every platform. This is where a Windows encoding difference would
+          # show up as a name that no longer matches.
+          superagentic claim work --db ci.db --brief --worker probe | tee brief.txt
+          grep -q "Process u0 from /tmp/u0" brief.txt
+          grep -q "DONE WHEN" brief.txt
+          superagentic release work:u0 --db ci.db --worker probe
           for _ in 1 2 3 4; do
             ( while u=$(superagentic claim work --json --db ci.db); do
                 id=$(python -c "import json,sys;print(json.loads(sys.argv[1])[0]['unit_id'])" "$u")
