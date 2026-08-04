@@ -16,6 +16,11 @@ and never why.
   `* text=auto eol=lf` now pins the checkout everywhere, every doc read in the
   suite normalises newlines regardless, and a test reproduces the whole thing
   without needing Windows by handing those assertions a CRLF file.
+- **The sdist job broke on the same shape of bug**, twice in one release: a
+  test read a repo file the tarball does not ship. `ee/LICENSE` first, then
+  `.gitattributes`. Both are now guarded by an existence check, because the
+  suite runs inside the unpacked sdist in CI and their absence there is
+  correct rather than a failure.
 - `subprocess.Popen(..., text=True)` in the cross-process test now passes
   `encoding="utf-8"`. Without it the pipes decode with the locale codec, which
   is cp1252 on Windows.
