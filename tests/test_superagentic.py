@@ -1225,3 +1225,62 @@ class TestLicenceBoundary:
 
     def test_the_root_licence_is_still_apache(self):
         assert "Apache License" in (ROOT / "LICENSE").read_text(encoding="utf-8")
+
+
+class TestReadmeIsTrue:
+    """A README that overstates is worse than a thin one: it is the only thing
+    most people will ever read, and nothing else in the repo contradicts it."""
+
+    def _readme(self):
+        return (ROOT / "README.md").read_text(encoding="utf-8")
+
+    def test_the_mcp_tool_count_is_right(self):
+        import re
+
+        from superagentic.mcp import _tools
+        words = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+                 "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17}
+        m = re.search(r"([A-Za-z]+) MCP tools", self._readme())
+        assert m, "the README no longer states a tool count"
+        assert words[m[1].lower()] == len(_tools()), \
+            f"README says {m[1]}, there are {len(_tools())}"
+
+    def test_every_tool_and_command_named_exists(self):
+        import re
+
+        from superagentic.cli import build_parser
+        from superagentic.mcp import _tools
+        r = self._readme()
+        real = {t["name"] for t in _tools()}
+        named = set(re.findall(
+            r"`(\w+_(?:run|runs|skill|skills|kind|jobs|job|prompt|results|status))`", r))
+        assert not named - real, sorted(named - real)
+        cmds = set(re.findall(r"superagentic (\w+)", r))
+        realc = set(build_parser()._subparsers._group_actions[0].choices)
+        # "as" comes from "install superagentic ... as a library".
+        assert not cmds - realc - {"as"}, sorted(cmds - realc - {"as"})
+
+    def test_the_zero_dependency_claim_is_true(self):
+        import tomllib
+        assert "no\ndependencies at all" in self._readme() \
+            or "no dependencies at all" in self._readme()
+        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        assert cfg["project"]["dependencies"] == []
+
+    def test_the_wordmark_is_committed_and_renders_without_a_style_block(self):
+        import xml.dom.minidom
+        svg = ROOT / "assets" / "superagentic.svg"
+        assert svg.exists(), "README references a wordmark that is not in the repo"
+        assert 'src="assets/superagentic.svg"' in self._readme()
+        d = xml.dom.minidom.parse(str(svg))
+        els = {n.tagName for n in d.getElementsByTagName("*")}
+        # GitHub strips <style> from SVG rendered in a README, so the wordmark
+        # has to carry presentation attributes or it renders as black text.
+        assert "style" not in els, "SVG uses a <style> block; GitHub will strip it"
+        assert 'alt="SuperAgentic"' in self._readme(), \
+            "no alt text; PyPI cannot resolve the relative path and shows nothing"
+
+    def test_no_em_dashes(self):
+        r = self._readme()
+        assert "—" not in r, "em dash in README"
+        assert "–" not in r, "en dash in README"

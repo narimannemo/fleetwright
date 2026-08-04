@@ -55,8 +55,8 @@ packages = ["src/superagentic"]
 # question becomes a licence problem. The published package is Apache-2.0
 # throughout.
 include = ["src/superagentic", "tests", "examples", "docs", "packaging",
-           "skills", "README.md", "LICENSE", "LICENSING.md", "CHANGELOG.md",
-           "CONTRIBUTING.md"]
+           "skills", "assets", "README.md", "LICENSE", "LICENSING.md",
+           "CHANGELOG.md", "CONTRIBUTING.md"]
 # `include` is not enough. Hatchling collects licence files from anywhere in
 # the tree as metadata, so ee/LICENSE landed in the sdist even though `ee` was
 # never listed. An explicit exclude is what actually keeps it out — verified by

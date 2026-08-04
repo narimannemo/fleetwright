@@ -5,6 +5,21 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.9.2] — 2026-08-04
+
+### Changed
+
+- **README rewritten around what the package is for**, leading with the two
+  questions a freshly spawned agent cannot answer for itself: which unit is
+  mine, and what am I supposed to do with it. Everything else follows from
+  those. The SuperAgentic wordmark is now at the top, committed as an SVG that
+  carries presentation attributes rather than a `<style>` block, since GitHub
+  strips embedded stylesheets from SVG in a README.
+- Five tests keep the README honest: the stated MCP tool count must equal the
+  real one, every tool and command it names must exist, the zero-dependency
+  claim is checked against `pyproject.toml`, the wordmark must be committed and
+  free of a `<style>` block, and there are no em dashes.
+
 ## [0.9.1] — 2026-08-04
 
 ### Fixed
