@@ -394,3 +394,54 @@ class TestDocs:
             t = f.read_text(encoding="utf-8").lower()
             assert "exactly-once" not in t or "not exactly-once" in t \
                 or "cannot" in t, f"{f.name} may be overpromising delivery"
+
+
+class TestPackaging:
+    """The formula is generated, so the generator is what has to be right."""
+
+    def _formula(self, monkeypatch, capsys):
+        sys.path.insert(0, str(ROOT / "packaging"))
+        import brew_formula
+        monkeypatch.setattr(brew_formula, "sdist", lambda v: (
+            f"https://files.pythonhosted.org/packages/ab/superagentic-{v}.tar.gz",
+            "0" * 64,
+            "Work leases in one SQLite file, so a fleet of agents divides a job "
+            "list instead of racing it. Library, CLI and MCP server."))
+        monkeypatch.setattr(sys, "argv", ["brew_formula.py", "v0.1.0"])
+        assert brew_formula.main() == 0
+        return capsys.readouterr().out
+
+    def test_ruby_interpolation_survives_the_python_template(self, monkeypatch, capsys):
+        out = self._formula(monkeypatch, capsys)
+        # `#{bin}` is Ruby interpolation and `{bin}` is a str.format field.
+        # Getting the escaping wrong produces a formula that installs and then
+        # fails its own test block, in someone else's CI.
+        assert "#{bin}/superagentic" in out
+        assert "{{" not in out and "#{{" not in out
+
+    def test_the_formula_names_the_published_sdist_and_its_checksum(self, monkeypatch, capsys):
+        out = self._formula(monkeypatch, capsys)
+        assert 'url "https://files.pythonhosted.org/packages/ab/superagentic-0.1.0.tar.gz"' in out
+        assert f'sha256 "{"0" * 64}"' in out
+        assert "class Superagentic < Formula" in out
+
+    def test_desc_meets_homebrew_audit_rules(self, monkeypatch, capsys):
+        desc = [ln for ln in self._formula(monkeypatch, capsys).splitlines()
+                if ln.strip().startswith("desc ")][0].strip()[6:-1]
+        assert len(desc) <= 70, "brew audit rejects a desc over 80 incl. `desc `"
+        assert not desc.endswith(("lis", "sever")) and desc.split()[-1] != "a", \
+            "truncated mid-word; cut at a word boundary"
+        assert not desc.endswith("."), "brew audit rejects a trailing full stop"
+        assert not desc.lower().startswith("superagentic"), \
+            "brew audit rejects a desc starting with the formula name"
+
+    def test_no_resource_blocks_because_there_are_no_dependencies(self, monkeypatch, capsys):
+        # If a runtime dependency is ever added this test fails, which is the
+        # reminder that the formula now needs resource blocks per transitive
+        # dependency and this file is no longer twenty lines.
+        import tomllib
+        deps = tomllib.loads(
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+        assert deps == [], f"add resource blocks to the formula for {deps}"
+        # An actual resource block, not the word in the explanatory comment.
+        assert "\n  resource " not in self._formula(monkeypatch, capsys)

@@ -46,8 +46,56 @@ jobs:
       # published files carry provenance back to this workflow and this commit.
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  github-release:
+  # Regenerated from the version just published, so the formula can never
+  # describe a release that does not exist. Pushed to the tap when a token is
+  # configured, and attached to the GitHub release either way -- a release that
+  # silently skipped the formula is worse than one that obviously did not have
+  # a tap yet.
+  brew-formula:
     needs: pypi
+    runs-on: ubuntu-latest
+    # Hoisted to job level on purpose: `secrets` is NOT an available context in
+    # a step-level `if`, so `if: secrets.TAP_TOKEN != ''` does not do what it
+    # looks like it does. `env` is available, so the secret is read once here
+    # and the step tests that.
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: wait for the PyPI index to serve the new sdist
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf "https://pypi.org/pypi/superagentic/${GITHUB_REF_NAME#v}/json" >/dev/null && exit 0
+            sleep 10
+          done
+          echo "PyPI never served ${GITHUB_REF_NAME#v}"; exit 1
+      - run: python packaging/brew_formula.py "$GITHUB_REF_NAME" > superagentic.rb
+      - run: cat superagentic.rb
+      - uses: actions/upload-artifact@v4
+        with: { name: brew, path: superagentic.rb }
+      - name: push to the tap, if one is configured
+        if: ${{ env.TAP_TOKEN != '' }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/narimannemo/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp superagentic.rb tap/Formula/superagentic.rb
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/superagentic.rb
+          git diff --staged --quiet || git commit -m "superagentic ${GITHUB_REF_NAME#v}"
+          git push
+      - name: say so when the tap was skipped
+        if: ${{ env.TAP_TOKEN == '' }}
+        run: |
+          echo "::notice::No TAP_TOKEN secret, so the formula was not pushed to"\
+               " the tap. It is attached to the GitHub release instead."
+
+  github-release:
+    needs: [pypi, brew-formula]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -55,6 +103,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: dist, path: dist/ }
+      - uses: actions/download-artifact@v4
+        with: { name: brew, path: dist/ }
       - name: notes from the CHANGELOG, not from commit subjects
         run: |
           python - <<'PY' > notes.md

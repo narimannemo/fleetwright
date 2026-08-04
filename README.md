@@ -23,8 +23,10 @@ with it*. A library, a CLI and an MCP server, in one SQLite file, with **no
 dependencies at all**.
 
 ```bash
-uv tool install superagentic     # the CLI, isolated, on your PATH
-uv pip install superagentic      # or as a library, in your project
+uv tool install superagentic                      # the CLI, on your PATH
+uvx superagentic demo                             # or run it without installing
+uv pip install superagentic                       # or as a library
+brew install narimannemo/tap/superagentic         # or via Homebrew
 ```
 
 ## The shape of it
@@ -203,6 +205,7 @@ See [MCP](docs/mcp.md).
 | [Concepts](docs/concepts.md) | leases, attempts, and what this deliberately is not |
 | [MCP](docs/mcp.md) | wiring it to Claude Code, Cursor, or your own agent |
 | [Reference](docs/reference.md) | every command and the Python API |
+| [Packaging](packaging/README.md) | uv, Homebrew, pip — and which to use |
 
 ## What it is not
 
