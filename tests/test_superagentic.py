@@ -1325,3 +1325,26 @@ class TestLineEndings:
         t.test_the_zero_dependency_claim_is_true()
         t.test_no_em_dashes()
         t.test_every_tool_and_command_named_exists()
+
+
+class TestMetadataMatchesReality:
+    def test_the_classifiers_list_every_python_ci_tests(self):
+        """The pyversions badge is generated from these. Listing fewer than CI
+        tests understates support; listing more claims something untested."""
+        import re
+        import tomllib
+        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        declared = {c.rsplit(" ", 1)[1] for c in cfg["project"]["classifiers"]
+                    if c.startswith("Programming Language :: Python :: 3")}
+        ci = (ROOT / ".github" / "workflows" / "ci.yml")
+        if not ci.exists():
+            pytest.skip("not a git checkout (running from an sdist)")
+        tested = set(re.findall(r'python:\s*"(3\.\d+)"', ci.read_text(encoding="utf-8")))
+        assert declared == tested, f"declared {sorted(declared)}, CI tests {sorted(tested)}"
+
+    def test_requires_python_agrees_with_the_lowest_tested(self):
+        import tomllib
+        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        declared = sorted(c.rsplit(" ", 1)[1] for c in cfg["project"]["classifiers"]
+                          if c.startswith("Programming Language :: Python :: 3"))
+        assert cfg["project"]["requires-python"] == f">={declared[0]}"

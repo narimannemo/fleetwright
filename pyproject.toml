@@ -11,7 +11,12 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
+    # Every version CI actually tests. Listing only 3.11 made the
+    # pyversions badge read "3.11", which understates support and is exactly
+    # the sort of thing that makes someone on 3.13 not try it.
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Distributed Computing",
     "Topic :: Software Development :: Libraries",
 ]

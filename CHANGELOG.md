@@ -5,6 +5,17 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.9.3] — 2026-08-04
+
+### Fixed
+
+- **The `python` badge said 3.11 while CI tests 3.11, 3.12 and 3.13.** The
+  classifiers listed one version, the badge faithfully reported it, and anyone
+  on 3.13 saw a package that looked like it would not run. Both later versions
+  are now declared, with a test asserting the classifiers and the CI matrix
+  always agree, in both directions: listing fewer understates support, listing
+  more claims something untested.
+
 ## [0.9.2] — 2026-08-04
 
 ### Fixed
