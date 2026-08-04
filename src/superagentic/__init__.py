@@ -32,6 +32,7 @@ from .leases import (
     add,
     claim,
     connect,
+    define,
     fail,
     failures,
     finish,
@@ -40,12 +41,14 @@ from .leases import (
     progress,
     reclaim,
     release,
+    results,
+    spec,
     this_worker,
 )
 
 __version__ = "0.1.0"
 
 __all__ = ["DEFAULT_LEASE", "DONE", "FAILED", "LEASED", "MAX_ATTEMPTS", "OPEN",
-           "Unit", "add", "claim", "connect", "fail", "failures", "finish",
-           "heartbeat", "leased", "progress", "reclaim", "release",
-           "this_worker"]
+           "Unit", "add", "claim", "connect", "define", "fail", "failures",
+           "finish", "heartbeat", "leased", "progress", "reclaim", "release",
+           "results", "spec", "this_worker"]

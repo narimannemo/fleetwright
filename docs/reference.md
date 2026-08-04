@@ -3,12 +3,14 @@
 ## Commands
 
 ```
+superagentic define KIND       say what this kind of work IS
 superagentic add KIND NAME…    enqueue units; --from-file for a corpus
 superagentic claim [KIND]      take work; exits 1 when the queue is dry
 superagentic done UNIT_ID      mark finished
 superagentic fail UNIT_ID      report one that could not be done
 superagentic release UNIT_ID   hand back, no attempt burned
 superagentic status            what is left, who holds what
+superagentic results [KIND]    what the fleet handed back
 superagentic reclaim           return expired leases now
 superagentic serve             the MCP server, on stdio
 superagentic demo              a fleet, a crash, a recovery
@@ -16,11 +18,38 @@ superagentic demo              a fleet, a crash, a recovery
 
 Every command except `demo` takes `--db` (default `work.db`).
 
+### `define`
+
+```bash
+superagentic define extract \
+  --instructions 'Read $path. Record every claim it makes, quoting verbatim.' \
+  --done-when    'every claim on the page is recorded, or you have established
+                  there are none' \
+  --returns      '{"claims": <int>, "notes": "<string>"}' \
+  --tools        'the xrad MCP server: record_claim, check_quote'
+
+superagentic define extract --instructions-file prompts/extract.md
+```
+
+Say what the work **is**, once. Every worker that claims a unit of this kind is
+handed these instructions — including a worker spawned an hour later, and the
+one that inherits a unit a crashed worker dropped. That is the reason they live
+here and not in the prompt you spawn workers with.
+
+`$name` is the unit; `$key` is any string or number in that unit's `meta`.
+Substitution is `string.Template`, so **JSON in your instructions is safe** and
+an unknown `$placeholder` is left alone rather than failing at the moment a
+worker asks for work.
+
+Re-defining replaces. Instructions are read at claim time, so a correction
+reaches every worker that has not yet claimed, without restarting anything.
+
 ### `add`
 
 ```bash
 superagentic add translate p1 p2 p3
 superagentic add translate --from-file pages.txt --priority 5
+superagentic add extract --from-file pages.txt --meta '{"path": "scans/$name.png"}'
 ls corpus/ | superagentic add extract --from-file -
 ```
 
@@ -31,7 +60,15 @@ only what is new. The same name under two kinds is two units.
 
 ```bash
 superagentic claim translate --lease 1800 -n 5
-superagentic claim --json                      # any kind, machine-readable
+superagentic claim --json                      # the unit and its full brief
+superagentic claim extract --brief             # just the assignment, as text
+```
+
+`--brief` prints the whole assignment and nothing else, for handing straight to
+an agent:
+
+```bash
+superagentic claim extract --brief | claude -p -
 ```
 
 Exits **1** with no stdout when there is nothing to take, so:
@@ -61,6 +98,15 @@ superagentic status --who
 superagentic status extract --json
 ```
 
+### `results`
+
+```bash
+superagentic results extract --json
+```
+
+What finished units handed back, in the order they finished. For the process
+that spawned the fleet and now has to assemble the output.
+
 ### `reclaim`
 
 Returns expired leases immediately. Rarely needed — `claim` does it — but
@@ -89,20 +135,36 @@ import superagentic as sa
 
 conn = sa.connect("work.db")
 
+sa.define(conn, kind, instructions, *, done_when=None, returns=None, tools=None)
+sa.spec(conn, kind)                                   -> dict | None
 sa.add(conn, kind, names, priority=0, meta=None)      -> int (how many were new)
 sa.claim(conn, kind=None, *, worker=None, lease=900, n=1)  -> list[Unit]
 sa.heartbeat(conn, unit_ids, *, worker, lease=900)    -> int (rows extended)
-sa.finish(conn, unit_id, *, worker=None, note=None)   -> bool
+sa.finish(conn, unit_id, *, worker=None, note=None, result=None, then=None) -> bool
 sa.fail(conn, unit_id, *, note, worker=None)          -> bool
 sa.release(conn, unit_id, *, worker=None, note=None)  -> bool
 sa.reclaim(conn)                                      -> int
 sa.progress(conn, kind=None)                          -> {kind: {status: n}}
 sa.leased(conn)                                       -> rows, who holds what
 sa.failures(conn)                                     -> rows, with the note
+sa.results(conn, kind=None)                           -> what workers handed back
 ```
 
 `Unit` carries `unit_id`, `kind`, `name`, `attempts`, `leased_until`, `meta`,
-and a `seconds_left` property.
+the rendered `instructions` / `done_when` / `returns` / `tools`, a
+`seconds_left` property, and `brief()` — the whole assignment as one block of
+text, because an agent handed four fields will read one of them.
+
+`then` on `finish` enqueues the next stage, and is how a pipeline is built
+without this becoming a scheduler:
+
+```python
+sa.finish(conn, u.unit_id, result={"claims": 12},
+          then={"audit": [f"claim-{i}" for i in ids]})
+```
+
+Nothing is enqueued if the close failed, so a worker that lost its lease cannot
+inject work off the back of a unit it no longer owns.
 
 The booleans are load-bearing: `False` from `finish` means the lease expired
 and another worker owns the unit. Do not assert on it — handle it.

@@ -66,6 +66,96 @@ class TestQueue:
         assert sa.claim(conn, "x", worker="w")[0].meta["nested"]["n"] == 1
 
 
+class TestTheBrief:
+    """What separates this from a queue: a worker is told what to do."""
+
+    def test_a_claimed_unit_carries_its_kinds_instructions(self, conn):
+        sa.define(conn, "extract", instructions="Read $path. Record claims.",
+                  done_when="every claim recorded", returns='{"claims": <int>}',
+                  tools="xrad MCP")
+        sa.add(conn, "extract", ["p0189"], meta={"path": "scans/p0189.png"})
+        u = sa.claim(conn, "extract", worker="w")[0]
+        assert u.instructions == "Read scans/p0189.png. Record claims."
+        assert u.done_when == "every claim recorded"
+        assert "record_claim" not in u.brief()          # only what was defined
+        assert "scans/p0189.png" in u.brief()
+
+    def test_meta_values_may_themselves_template_on_the_unit_name(self, conn):
+        # The useful way to give 2,000 units a path is one template, not 2,000
+        # dicts. Without the second pass the agent is handed the literal
+        # `scans/$name.png`, which is exactly what the demo shipped with once.
+        sa.define(conn, "x", instructions="Read $path.")
+        sa.add(conn, "x", ["p7"], meta={"path": "scans/$name.png"})
+        assert sa.claim(conn, "x", worker="w")[0].instructions == \
+            "Read scans/p7.png."
+
+    def test_instructions_survive_json_braces(self, conn):
+        # str.format would raise on this. Instructions to agents are full of
+        # JSON, so the substitution has to tolerate braces.
+        sa.define(conn, "x", instructions='Return {"ok": true} for $name.')
+        sa.add(conn, "x", ["u1"])
+        assert sa.claim(conn, "x", worker="w")[0].instructions == \
+            'Return {"ok": true} for u1.'
+
+    def test_an_unknown_placeholder_is_left_alone_not_an_error(self, conn):
+        sa.define(conn, "x", instructions="Use $missing on $name.")
+        sa.add(conn, "x", ["u1"])
+        # A worker asking for work must not fail because a template was wrong.
+        assert sa.claim(conn, "x", worker="w")[0].instructions == \
+            "Use $missing on u1."
+
+    def test_a_retried_unit_says_so_in_its_brief(self, conn):
+        sa.define(conn, "x", instructions="do it")
+        sa.add(conn, "x", ["u1"])
+        sa.claim(conn, "x", worker="a", lease=0.01)
+        time.sleep(0.05)
+        assert "attempt 2" in sa.claim(conn, "x", worker="b")[0].brief()
+
+    def test_redefining_reaches_workers_that_have_not_claimed_yet(self, conn):
+        sa.define(conn, "x", instructions="old")
+        sa.add(conn, "x", ["u1", "u2"])
+        sa.claim(conn, "x", worker="a")
+        sa.define(conn, "x", instructions="new")
+        assert sa.claim(conn, "x", worker="b")[0].instructions == "new"
+
+    def test_a_kind_with_no_spec_still_works(self, conn):
+        sa.add(conn, "bare", ["u1"])
+        u = sa.claim(conn, "bare", worker="w")[0]
+        assert u.instructions == "" and u.name in u.brief()
+
+
+class TestResults:
+    def test_a_worker_hands_back_output_the_orchestrator_collects(self, conn):
+        sa.define(conn, "x", instructions="do it")
+        sa.add(conn, "x", ["u1", "u2"])
+        for u in sa.claim(conn, "x", worker="w", n=2):
+            sa.finish(conn, u.unit_id, worker="w", result={"n": int(u.name[-1])})
+        got = sa.results(conn, "x")
+        assert [r["result"]["n"] for r in got] == [1, 2]
+
+    def test_finishing_without_a_result_is_none_not_missing(self, conn):
+        sa.add(conn, "x", ["u1"])
+        u = sa.claim(conn, "x", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        assert sa.results(conn)[0]["result"] is None
+
+    def test_then_enqueues_the_next_stage(self, conn):
+        sa.add(conn, "extract", ["p1"])
+        u = sa.claim(conn, "extract", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w", then={"audit": ["c1", "c2"]})
+        assert sa.progress(conn)["audit"][sa.OPEN] == 2
+
+    def test_a_lost_lease_cannot_inject_follow_on_work(self, conn):
+        sa.add(conn, "extract", ["p1"])
+        slow = sa.claim(conn, "extract", worker="slow", lease=0.01)[0]
+        time.sleep(0.05)
+        sa.claim(conn, "extract", worker="fast")
+        assert sa.finish(conn, slow.unit_id, worker="slow",
+                         then={"audit": ["c1"]}) is False
+        assert "audit" not in sa.progress(conn), \
+            "a worker that lost its lease must not enqueue off the back of it"
+
+
 class TestFailure:
     """A lease is only worth having if these hold."""
 
@@ -215,7 +305,8 @@ class TestMCP:
         s = self._server(tmp_path)
         listed = s.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {t["name"] for t in listed["result"]["tools"]}
-        assert names == {"claim_job", "finish_job", "release_job", "fail_job",
+        assert names == {"define_kind", "add_jobs", "job_results",
+                         "claim_job", "finish_job", "release_job", "fail_job",
                          "heartbeat_job", "job_status"}
         for n in names:
             assert callable(getattr(s, n)), f"{n} is advertised but not implemented"
@@ -231,6 +322,28 @@ class TestMCP:
         got = s.claim_job({"kind": "x"})
         assert got["units"][0]["name"] == "u1"
         assert s.finish_job({"unit_id": "x:u1"})["finished"] is True
+
+    def test_an_orchestrator_can_set_up_a_fleet_through_mcp_alone(self, tmp_path):
+        s = self._server(tmp_path)
+        s.define_kind({"kind": "extract",
+                       "instructions": "Read $path and record claims.",
+                       "done_when": "every claim recorded",
+                       "returns": '{"claims": <int>}'})
+        assert s.add_jobs({"kind": "extract", "names": ["p1"],
+                           "meta": {"path": "a.png"}})["added"] == 1
+        u = s.claim_job({"kind": "extract"})["units"][0]
+        assert u["instructions"] == "Read a.png and record claims."
+        assert "DONE WHEN" in u["brief"]
+        s.finish_job({"unit_id": u["unit_id"], "result": {"claims": 7}})
+        assert s.job_results({})["results"][0]["result"]["claims"] == 7
+
+    def test_enqueueing_an_undefined_kind_is_refused_with_the_fix(self, tmp_path):
+        out = self._server(tmp_path).add_jobs({"kind": "nope", "names": ["u1"]})
+        assert out["ok"] is False and "define_kind" in out["message"]
+
+    def test_a_kind_without_done_when_warns(self, tmp_path):
+        out = self._server(tmp_path).define_kind({"kind": "x", "instructions": "go"})
+        assert "warning" in out
 
     def test_a_retried_unit_is_flagged_to_the_agent(self, tmp_path):
         s = self._server(tmp_path)

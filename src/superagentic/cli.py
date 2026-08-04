@@ -26,6 +26,35 @@ def _conn(a: argparse.Namespace):
     return leases.connect(Path(a.db))
 
 
+def _cmd_define(a: argparse.Namespace) -> int:
+    instructions = a.instructions
+    if a.instructions_file:
+        instructions = (sys.stdin.read() if a.instructions_file == "-"
+                        else Path(a.instructions_file).read_text(encoding="utf-8"))
+    if not instructions:
+        print("no instructions — pass --instructions or --instructions-file",
+              file=sys.stderr)
+        return 2
+    leases.define(_conn(a), a.kind, instructions, done_when=a.done_when,
+                  returns=a.returns, tools=a.tools)
+    print(f"defined {a.kind}")
+    if not a.done_when:
+        print("  warning: no --done-when. Every worker will decide for itself "
+              "what finished means, and they will not agree.", file=sys.stderr)
+    return 0
+
+
+def _cmd_results(a: argparse.Namespace) -> int:
+    rows = leases.results(_conn(a), a.kind)
+    if a.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    for r in rows:
+        print(f"{r['name']}\t{json.dumps(r['result'], ensure_ascii=False)}")
+    print(f"{len(rows)} finished", file=sys.stderr)
+    return 0
+
+
 def _cmd_add(a: argparse.Namespace) -> int:
     names = list(a.name or [])
     if a.from_file == "-":
@@ -41,8 +70,16 @@ def _cmd_add(a: argparse.Namespace) -> int:
         print("no units — pass them as arguments, or --from-file (- for stdin)",
               file=sys.stderr)
         return 2
-    added = leases.add(_conn(a), a.kind, names, priority=a.priority)
+    conn = _conn(a)
+    added = leases.add(conn, a.kind, names, priority=a.priority,
+                       meta=json.loads(a.meta) if a.meta else None)
     print(f"{added:,} new · {len(names) - added:,} already queued")
+    if leases.spec(conn, a.kind) is None:
+        # Not an error — a bare queue is a legitimate use. But it is almost
+        # always a forgotten `define`, and the worker finds out much later.
+        print(f"  warning: {a.kind!r} has no instructions. Workers claiming "
+              f"these get a bare name. `superagentic define {a.kind} …`",
+              file=sys.stderr)
     return 0
 
 
@@ -55,7 +92,15 @@ def _cmd_claim(a: argparse.Namespace) -> int:
         return 1
     if a.json:
         print(json.dumps([{"unit_id": u.unit_id, "kind": u.kind, "name": u.name,
-                           "attempts": u.attempts, "meta": u.meta} for u in got]))
+                           "attempts": u.attempts, "meta": u.meta,
+                           "instructions": u.instructions,
+                           "done_when": u.done_when, "returns": u.returns,
+                           "tools": u.tools, "brief": u.brief()} for u in got]))
+        return 0
+    if a.brief:
+        # For piping straight into an agent: `superagentic claim x --brief |
+        # claude -p -`. The whole assignment, nothing else on stdout.
+        print("\n\n".join(u.brief() for u in got))
         return 0
     for u in got:
         again = f"  (attempt {u.attempts})" if u.attempts > 1 else ""
@@ -65,7 +110,8 @@ def _cmd_claim(a: argparse.Namespace) -> int:
 
 
 def _cmd_done(a: argparse.Namespace) -> int:
-    if leases.finish(_conn(a), a.unit_id, worker=a.worker, note=a.note):
+    if leases.finish(_conn(a), a.unit_id, worker=a.worker, note=a.note,
+                     result=json.loads(a.result) if a.result else None):
         print(f"done {a.unit_id}")
         return 0
     print(f"not yours — {a.unit_id}'s lease expired and another worker holds it",
@@ -148,11 +194,28 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--db", default="work.db")
         return sp
 
+    s = common(sub.add_parser("define", help="say what a kind of work IS"))
+    s.add_argument("kind")
+    s.add_argument("--instructions", help="what to do; written for an agent "
+                                          "with no other context")
+    s.add_argument("--instructions-file", help="read them from a file; - for stdin")
+    s.add_argument("--done-when", help="what finished looks like")
+    s.add_argument("--returns", help="the shape a worker should hand back")
+    s.add_argument("--tools", help="which tools or MCP servers to use")
+    s.set_defaults(fn=_cmd_define)
+
+    s = common(sub.add_parser("results", help="what the fleet produced"))
+    s.add_argument("kind", nargs="?")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=_cmd_results)
+
     s = common(sub.add_parser("add", help="enqueue units of work"))
     s.add_argument("kind")
     s.add_argument("name", nargs="*")
     s.add_argument("--from-file", help="one unit per line; - for stdin")
     s.add_argument("--priority", type=int, default=0)
+    s.add_argument("--meta", help="JSON carried with each unit; its keys are "
+                                  "substituted into the instructions")
     s.set_defaults(fn=_cmd_add)
 
     s = common(sub.add_parser("claim", help="take work nobody else holds"))
@@ -162,10 +225,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="seconds; several times your slowest unit")
     s.add_argument("-n", type=int, default=1, help="take a batch")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--brief", action="store_true",
+                   help="print the full assignment, for piping into an agent")
     s.set_defaults(fn=_cmd_claim)
 
     s = common(sub.add_parser("done", help="mark a unit finished"))
     s.add_argument("unit_id")
+    s.add_argument("--result", help="JSON the worker produced")
     s.add_argument("--note")
     s.add_argument("--worker")
     s.set_defaults(fn=_cmd_done)

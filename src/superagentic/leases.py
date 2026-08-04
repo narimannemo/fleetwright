@@ -49,6 +49,8 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from string import Template
+from typing import Any
 
 #: Long enough that a heartbeat is optional for short units, short enough that
 #: a crashed worker's unit is not stranded for an afternoon.
@@ -62,6 +64,28 @@ MAX_ATTEMPTS = 3
 OPEN, LEASED, DONE, FAILED = "open", "leased", "done", "failed"
 
 SCHEMA = """
+-- What a kind of work IS, as opposed to which units of it are outstanding.
+--
+-- This is the table that makes the difference between a queue and something an
+-- agent can use. A freshly spawned agent has no context: it did not read your
+-- orchestration code and it will not remember the last session. Handing it
+-- `page-0189` tells it nothing. Handing it `page-0189` together with what to
+-- do, what finished looks like, and what to hand back is the whole job.
+--
+-- Keeping the instructions HERE rather than in the spawn prompt is the point.
+-- A prompt is written once by whoever launched the fleet and is invisible to
+-- the ninth agent that starts an hour later; a kind is read at claim time by
+-- every worker that ever takes one of these units, including the one that
+-- picks up a unit a dead agent abandoned.
+CREATE TABLE IF NOT EXISTS kind (
+    kind TEXT PRIMARY KEY,
+    instructions TEXT NOT NULL,
+    done_when TEXT,
+    returns TEXT,
+    tools TEXT,
+    updated_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS unit (
     -- kind:name, so enqueueing the same work twice is a no-op rather than a
     -- second copy. Callers re-run their enumeration all the time.
@@ -78,8 +102,14 @@ CREATE TABLE IF NOT EXISTS unit (
     attempts INTEGER NOT NULL DEFAULT 0,
     priority INTEGER NOT NULL DEFAULT 0,
     note TEXT,
-    -- Whatever the caller needs in order to do the work. Opaque JSON; nothing
-    -- here ever reads inside it.
+    -- What the worker handed back. The orchestrator that spawned the fleet has
+    -- to collect the output from somewhere, and a queue that takes work but
+    -- returns nothing makes every caller invent a side channel.
+    result TEXT,
+    -- Whatever the worker needs in order to do the work: a path, a URL, a page
+    -- range. Opaque JSON, never inspected — but its keys are substituted into
+    -- the kind's instructions, so `$path` in the instructions becomes this
+    -- unit's path.
     meta TEXT,
     created_at REAL,
     updated_at REAL
@@ -91,7 +121,12 @@ CREATE INDEX IF NOT EXISTS unit_lease ON unit(status, leased_until);
 
 @dataclass(frozen=True)
 class Unit:
-    """One piece of work, leased to you until `leased_until`."""
+    """One piece of work, leased to you until `leased_until`.
+
+    `instructions`, `done_when` and `returns` come from the unit's kind with
+    this unit's `meta` substituted in, so a worker holding a Unit has
+    everything it needs and does not have to be told anything else.
+    """
 
     unit_id: str
     kind: str
@@ -99,10 +134,32 @@ class Unit:
     attempts: int
     leased_until: float
     meta: dict
+    instructions: str = ""
+    done_when: str = ""
+    returns: str = ""
+    tools: str = ""
 
     @property
     def seconds_left(self) -> float:
         return max(0.0, self.leased_until - time.time())
+
+    def brief(self) -> str:
+        """The whole assignment as text, for pasting into an agent's prompt."""
+        parts = [f"UNIT: {self.name}   (kind: {self.kind}, id: {self.unit_id})"]
+        if self.attempts > 1:
+            parts.append(f"NOTE: attempt {self.attempts}. A previous worker took "
+                         "this and never finished it.")
+        if self.instructions:
+            parts.append(f"\nWHAT TO DO\n{self.instructions}")
+        if self.tools:
+            parts.append(f"\nUSE\n{self.tools}")
+        if self.done_when:
+            parts.append(f"\nDONE WHEN\n{self.done_when}")
+        if self.returns:
+            parts.append(f"\nHAND BACK\n{self.returns}")
+        parts.append(f"\nCall finish (unit_id={self.unit_id}) when done, or fail "
+                     "with a reason. Do not start any other unit.")
+        return "\n".join(parts)
 
 
 def this_worker() -> str:
@@ -127,9 +184,74 @@ def connect(path: str | Path = "work.db") -> sqlite3.Connection:
     return conn
 
 
-def _to_unit(r: sqlite3.Row) -> Unit:
+def _render(text: str | None, unit_name: str, meta: dict) -> str:
+    """Substitute this unit's details into a kind's instructions.
+
+    `string.Template`, not `str.format`, and the choice matters: instructions
+    to an agent very often contain JSON, and `{"a": 1}` makes `format` raise.
+    `$path` is rare in prose and `safe_substitute` leaves anything it does not
+    recognise alone rather than failing at the moment a worker asks for work.
+    """
+    if not text:
+        return ""
+    # Two passes, because the useful way to give two thousand units a path is
+    # one template — `meta={"path": "scans/$name.png"}` — not two thousand
+    # dicts. So `$name` is expanded inside the meta VALUES first, and the
+    # result is what the instructions see.
+    scalars = {k: v for k, v in meta.items() if isinstance(v, (str, int, float))}
+    resolved = {k: (Template(v).safe_substitute(name=unit_name)
+                    if isinstance(v, str) else v)
+                for k, v in scalars.items()}
+    return Template(text).safe_substitute(
+        {"name": unit_name, "unit": unit_name, **resolved})
+
+
+def define(conn: sqlite3.Connection, kind: str, instructions: str, *,
+           done_when: str | None = None, returns: str | None = None,
+           tools: str | None = None) -> None:
+    """Say what this kind of work IS, once, so every worker is told the same thing.
+
+    The alternative is putting the instructions in the prompt that spawns the
+    fleet — where the ninth agent, started an hour later by a `claim` loop,
+    never sees them, and where the agent that inherits a dead worker's unit
+    certainly does not.
+
+    Use `$name` for the unit, and `$key` for any string or number in that
+    unit's `meta`:
+
+        define(conn, "extract",
+               instructions="Read $path. Record every claim it makes.",
+               done_when="every claim on the page is recorded, or you have "
+                         "established there are none",
+               returns='{"claims": <int>, "notes": "<string>"}',
+               tools="the `xrad` MCP server: record_claim, check_quote")
+
+    Re-defining a kind replaces it. Instructions are read at claim time, so a
+    correction reaches every worker that has not yet claimed, without
+    restarting anything.
+    """
+    conn.execute(
+        "INSERT OR REPLACE INTO kind (kind, instructions, done_when, returns, "
+        "tools, updated_at) VALUES (?,?,?,?,?,?)",
+        (kind, instructions, done_when, returns, tools, time.time()))
+    conn.commit()
+
+
+def spec(conn: sqlite3.Connection, kind: str) -> dict | None:
+    """What a kind of work is, unrendered. `None` if it was never defined."""
+    r = conn.execute("SELECT * FROM kind WHERE kind = ?", (kind,)).fetchone()
+    return dict(r) if r else None
+
+
+def _to_unit(r: sqlite3.Row, spec_row: sqlite3.Row | None = None) -> Unit:
+    meta = json.loads(r["meta"] or "{}")
+    sp = spec_row or {}
     return Unit(r["unit_id"], r["kind"], r["name"], r["attempts"],
-                r["leased_until"] or 0.0, json.loads(r["meta"] or "{}"))
+                r["leased_until"] or 0.0, meta,
+                _render(sp["instructions"] if sp else "", r["name"], meta),
+                _render(sp["done_when"] if sp else "", r["name"], meta),
+                _render(sp["returns"] if sp else "", r["name"], meta),
+                _render(sp["tools"] if sp else "", r["name"], meta))
 
 
 def add(conn: sqlite3.Connection, kind: str, names: list[str], *,
@@ -186,7 +308,11 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
     rows = conn.execute(
         "SELECT * FROM unit WHERE lease_token = ? ORDER BY priority DESC, created_at",
         (token,)).fetchall()
-    return [_to_unit(r) for r in rows]
+    # One lookup per distinct kind, not per unit: a batch of 20 is almost
+    # always 20 units of the same kind.
+    specs = {k: conn.execute("SELECT * FROM kind WHERE kind = ?", (k,)).fetchone()
+             for k in {r["kind"] for r in rows}}
+    return [_to_unit(r, specs.get(r["kind"])) for r in rows]
 
 
 def heartbeat(conn: sqlite3.Connection, unit_ids: list[str], *, worker: str,
@@ -210,11 +336,14 @@ def heartbeat(conn: sqlite3.Connection, unit_ids: list[str], *, worker: str,
 
 
 def _close(conn: sqlite3.Connection, unit_id: str, status: str, *,
-           worker: str | None, note: str | None) -> bool:
+           worker: str | None, note: str | None, result: Any = None) -> bool:
     now = time.time()
     sql = ("UPDATE unit SET status=?, worker=NULL, leased_until=NULL, "
-           "lease_token=NULL, note=?, updated_at=? WHERE unit_id=? AND status=?")
-    args: list = [status, note, now, unit_id, LEASED]
+           "lease_token=NULL, note=?, result=?, updated_at=? "
+           "WHERE unit_id=? AND status=?")
+    args: list = [status, note,
+                  None if result is None else json.dumps(result, ensure_ascii=False),
+                  now, unit_id, LEASED]
     if worker is not None:
         sql += " AND worker=?"
         args.append(worker)
@@ -224,15 +353,35 @@ def _close(conn: sqlite3.Connection, unit_id: str, status: str, *,
 
 
 def finish(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
-           note: str | None = None) -> bool:
-    """Mark a unit done. `False` means the lease was not yours to close.
+           note: str | None = None, result: Any = None,
+           then: dict[str, list[str]] | None = None) -> bool:
+    """Mark a unit done, hand back a result, and optionally enqueue what follows.
 
-    Worth handling rather than asserting on: `False` means this worker was
-    slow, the lease expired, and someone else owns the unit now. The work is
-    not necessarily wasted — with an idempotent write it converged — but this
-    worker should stop heartbeating and go ask for something else.
+    `False` means the lease was not yours to close — this worker was slow, it
+    expired, and someone else owns the unit now. Worth handling rather than
+    asserting on: the work may not be wasted, but this worker should stop
+    heartbeating and go ask for something else.
+
+    `result` is whatever the worker produced, JSON-serialisable. The
+    orchestrator that spawned the fleet has to collect output from somewhere,
+    and a queue that takes work but returns nothing makes every caller invent a
+    side channel.
+
+    `then` enqueues follow-on work, and is how a pipeline is built without this
+    becoming a scheduler:
+
+        finish(conn, u.unit_id, result={"claims": 12},
+               then={"audit": [f"claim-{i}" for i in ids]})
+
+    Nothing is enqueued if the close failed, so a worker that lost its lease
+    cannot inject work off the back of a unit it no longer owns.
     """
-    return _close(conn, unit_id, DONE, worker=worker, note=note)
+    ok = _close(conn, unit_id, DONE, worker=worker, note=note, result=result)
+    if ok and then:
+        for kind, names in then.items():
+            if names:
+                add(conn, kind, list(names))
+    return ok
 
 
 def release(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
@@ -302,6 +451,23 @@ def leased(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM unit WHERE status = ? ORDER BY leased_until", (LEASED,)
     ).fetchall()
+
+
+def results(conn: sqlite3.Connection, kind: str | None = None) -> list[dict]:
+    """What the fleet produced, for the orchestrator that spawned it.
+
+    Only finished units, in the order they finished. `result` is decoded; a
+    worker that finished without handing anything back has `None`, which is
+    different from having handed back nothing.
+    """
+    q = ("SELECT kind, name, unit_id, result, note, updated_at FROM unit "
+         "WHERE status = ?" + (" AND kind = ?" if kind else "") +
+         " ORDER BY updated_at")
+    args = (DONE, kind) if kind else (DONE,)
+    return [{"kind": r["kind"], "name": r["name"], "unit_id": r["unit_id"],
+             "result": json.loads(r["result"]) if r["result"] else None,
+             "note": r["note"], "finished_at": r["updated_at"]}
+            for r in conn.execute(q, args)]
 
 
 def failures(conn: sqlite3.Connection) -> list[sqlite3.Row]:

@@ -36,15 +36,68 @@ def _tools() -> list[dict]:
     # because nothing else will tell it the protocol. Every description says
     # what to do next and what the failure means.
     return [
+        # -- the orchestrator's half. An agent that spawns a fleet defines the
+        # work here first, so the workers it spawns need no prompt beyond
+        # "claim work and do it".
+        {
+            "name": "define_kind",
+            "description": (
+                "Say what a kind of work IS, once, before enqueueing any of "
+                "it. Every worker that claims a unit of this kind is handed "
+                "these instructions — including workers spawned an hour later "
+                "and the one that inherits a unit a crashed worker dropped. "
+                "Put the task here, not in the prompt you spawn workers with. "
+                "Use $name for the unit and $key for any value in its meta."),
+            "inputSchema": {
+                "type": "object", "required": ["kind", "instructions"],
+                "properties": {
+                    "kind": {"type": "string"},
+                    "instructions": {"type": "string", "description":
+                                     "What to do. Written for an agent with NO "
+                                     "other context."},
+                    "done_when": {"type": "string", "description":
+                                  "What finished looks like. Without this a "
+                                  "worker decides for itself and they disagree."},
+                    "returns": {"type": "string", "description":
+                                "The shape to hand back to finish_job."},
+                    "tools": {"type": "string", "description":
+                              "Which tools or MCP servers to use."}}},
+        },
+        {
+            "name": "add_jobs",
+            "description": (
+                "Enqueue units of a defined kind. Idempotent on kind+name, so "
+                "re-running an enumeration after the corpus grew adds only "
+                "what is new. `meta` travels with each unit and its keys are "
+                "substituted into the instructions."),
+            "inputSchema": {
+                "type": "object", "required": ["kind", "names"],
+                "properties": {
+                    "kind": {"type": "string"},
+                    "names": {"type": "array", "items": {"type": "string"}},
+                    "priority": {"type": "integer", "default": 0},
+                    "meta": {"type": "object"}}},
+        },
+        {
+            "name": "job_results",
+            "description": (
+                "Collect what the fleet produced. For the agent that spawned "
+                "the workers and now has to assemble their output."),
+            "inputSchema": {"type": "object", "properties": {
+                "kind": {"type": "string"}}},
+        },
+        # -- the worker's half.
         {
             "name": "claim_job",
             "description": (
                 "TAKE A UNIT OF WORK BEFORE STARTING ANY. Other workers share "
                 "this queue, and a unit you did not claim is one two of you "
                 "will do. Returns the unit and a unit_id, or reports the queue "
-                "is empty — in which case STOP. Do not invent work. Call "
-                "finish_job as soon as you are done, and heartbeat_job if the "
-                "unit will take longer than the lease."),
+                "is empty — in which case STOP. Do not invent work. THE UNIT "
+                "COMES WITH ITS OWN INSTRUCTIONS in `brief`: do what they say, "
+                "not what you assume the task is. Call finish_job as soon as "
+                "you are done, and heartbeat_job if the unit will take longer "
+                "than the lease."),
             "inputSchema": {"type": "object", "properties": {
                 "kind": {"type": "string",
                          "description": "translate, extract, audit… omit for any"},
@@ -58,8 +111,15 @@ def _tools() -> list[dict]:
                 "you took too long, another worker owns the unit now, and you "
                 "should claim a different one rather than carry on."),
             "inputSchema": {"type": "object", "required": ["unit_id"],
-                            "properties": {"unit_id": {"type": "string"},
-                                           "note": {"type": "string"}}},
+                            "properties": {
+                                "unit_id": {"type": "string"},
+                                "result": {"description":
+                                           "What you produced, in the shape the "
+                                           "unit's instructions asked for."},
+                                "then": {"type": "object", "description":
+                                         "Follow-on work: {kind: [names]}. Use "
+                                         "it to hand the next stage its units."},
+                                "note": {"type": "string"}}},
         },
         {
             "name": "release_job",
@@ -116,6 +176,33 @@ class Server:
 
     # -- tools -------------------------------------------------------------
 
+    def define_kind(self, a: dict) -> dict:
+        leases.define(self.conn, a["kind"], a["instructions"],
+                      done_when=a.get("done_when"), returns=a.get("returns"),
+                      tools=a.get("tools"))
+        out = {"defined": a["kind"]}
+        if not a.get("done_when"):
+            out["warning"] = ("No done_when. Workers will each decide for "
+                              "themselves what finished means, and they will "
+                              "not agree.")
+        return out
+
+    def add_jobs(self, a: dict) -> dict:
+        if leases.spec(self.conn, a["kind"]) is None:
+            return {"ok": False,
+                    "error": "undefined_kind",
+                    "message": f"define_kind({a['kind']!r}) first — otherwise "
+                               "every worker that claims one of these is handed "
+                               "a bare name and no instructions."}
+        added = leases.add(self.conn, a["kind"], list(a["names"]),
+                           priority=int(a.get("priority", 0)),
+                           meta=a.get("meta"))
+        return {"added": added, "already_queued": len(a["names"]) - added}
+
+    def job_results(self, a: dict) -> dict:
+        rows = leases.results(self.conn, a.get("kind"))
+        return {"count": len(rows), "results": rows}
+
     def claim_job(self, a: dict) -> dict:
         got = leases.claim(self.conn, a.get("kind"), worker=self.worker,
                            lease=a.get("lease_seconds", leases.DEFAULT_LEASE),
@@ -126,9 +213,19 @@ class Server:
                             "work — another worker is probably on what is left."}
         out = {"units": [{"unit_id": u.unit_id, "kind": u.kind, "name": u.name,
                           "attempts": u.attempts, "meta": u.meta,
-                          "lease_seconds_left": round(u.seconds_left)}
+                          "lease_seconds_left": round(u.seconds_left),
+                          "instructions": u.instructions,
+                          "done_when": u.done_when,
+                          "returns": u.returns,
+                          "tools": u.tools,
+                          # The same thing as one block of text, because an
+                          # agent handed four fields will read one of them.
+                          "brief": u.brief()}
                          for u in got],
                "worker": self.worker}
+        if any(not u.instructions for u in got):
+            out["warning"] = ("This kind has no instructions — nobody called "
+                              "define_kind. You are being handed a bare name.")
         if any(u.attempts > 1 for u in got):
             out["warning"] = ("This unit has been handed out before and never "
                               "finished. It may be the reason.")
@@ -136,7 +233,8 @@ class Server:
 
     def finish_job(self, a: dict) -> dict:
         ok = leases.finish(self.conn, a["unit_id"], worker=self.worker,
-                           note=a.get("note"))
+                           note=a.get("note"), result=a.get("result"),
+                           then=a.get("then"))
         return {"finished": True} if ok else {
             "finished": False,
             "reason": "the lease expired and another worker holds this unit — "

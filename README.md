@@ -5,19 +5,69 @@
 [![python](https://img.shields.io/pypi/pyversions/superagentic)](https://pypi.org/project/superagentic/)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
 
-**Ten agents pointed at the same corpus all start on page one.**
+**Spawn ten agents on one job and they all start on page one — then each
+invents its own idea of what "done" means.**
 
-No prompt fixes that. An agent cannot work on "something the others aren't"
-when it has no way to find out what the others are doing. It needs somewhere to
-say *I've taken this one*, and somewhere to look before it starts.
+Two problems, and they have the same cause: a freshly spawned agent has no
+context. It did not read your orchestration code, it cannot see the other nine,
+and it will not remember any of this next session. So it needs two things it
+can only get by asking:
 
-That place is a table. This is that table and six verbs — a library, a CLI, and
-an MCP server, in one SQLite file with **no dependencies at all**.
+- **which unit is mine** — nobody else is on it, and if I die it comes back;
+- **what am I supposed to do with it** — the task, what finished looks like,
+  what to hand back.
+
+`superagentic` is where both live. The orchestrator *defines the work* and
+*enqueues the units*; every worker *claims one and is handed the assignment
+with it*. A library, a CLI and an MCP server, in one SQLite file, with **no
+dependencies at all**.
 
 ```bash
 uv tool install superagentic     # the CLI, isolated, on your PATH
 uv pip install superagentic      # or as a library, in your project
 ```
+
+## The shape of it
+
+```python
+import superagentic as sa
+conn = sa.connect("work.db")
+
+# The orchestrator, once. This is the part a prompt cannot do:
+# the ninth worker, spawned an hour from now, reads the same thing.
+sa.define(conn, "extract",
+    instructions="Read $path. Record every claim it makes, quoting verbatim.",
+    done_when="every claim on the page is recorded, or you have established "
+              "there are none",
+    returns='{"claims": <int>, "notes": "<string>"}',
+    tools="the `xrad` MCP server: record_claim, check_quote")
+
+sa.add(conn, "extract", pages, meta={"path": "scans/$name.png"})
+```
+
+Then spawn ten agents with one instruction — *claim work and do it* — and each
+of them is handed this:
+
+```
+UNIT: p0189   (kind: extract, id: extract:p0189)
+
+WHAT TO DO
+Read scans/p0189.png. Record every claim it makes, quoting verbatim.
+
+USE
+the `xrad` MCP server: record_claim, check_quote
+
+DONE WHEN
+every claim on the page is recorded, or you have established there are none
+
+HAND BACK
+{"claims": <int>, "notes": "<string>"}
+
+Call finish (unit_id=extract:p0189) when done, or fail with a reason.
+Do not start any other unit.
+```
+
+When they are finished, `sa.results(conn, "extract")` is what they produced.
 
 ## In sixty seconds
 
@@ -75,22 +125,28 @@ and make the write at the end **idempotent**, so a unit done twice converges.
 When a lease is lost, `finish` returns `False` rather than raising. Handle it —
 this worker no longer owns the unit and should claim a different one.
 
-## From Python
+## The worker loop
 
 ```python
-import superagentic as sa
-
-conn = sa.connect("work.db")
-sa.add(conn, "translate", [f"page-{i}" for i in range(1, 2364)])
-
 while units := sa.claim(conn, "translate", lease=1800):
     for u in units:
         try:
-            do_the_work(u.name)
-            sa.finish(conn, u.unit_id)
+            out = do_the_work(u.name, u.instructions)
+            sa.finish(conn, u.unit_id, result=out)
         except Exception as e:
             sa.fail(conn, u.unit_id, note=str(e))
 ```
+
+Stages compose without this becoming a scheduler — a finishing worker hands the
+next stage its units:
+
+```python
+sa.finish(conn, u.unit_id, result={"claims": 12},
+          then={"audit": [f"claim-{i}" for i in ids]})
+```
+
+Nothing is enqueued if the close failed, so a worker that lost its lease cannot
+inject work off the back of a unit it no longer owns.
 
 ## From the shell
 
@@ -117,11 +173,21 @@ superagentic status --who
 
 ## From an agent
 
-Six MCP tools: `claim_job`, `finish_job`, `release_job`, `fail_job`,
-`heartbeat_job`, `job_status`. The descriptions tell the agent to claim before
-starting and to **stop when the queue is empty rather than invent work** —
-which is the failure mode worth designing against, since an agent with nothing
-to do will reliably find something.
+Nine MCP tools, split by who uses them.
+
+**The orchestrator** — the agent that spawns the fleet — uses `define_kind`,
+`add_jobs` and `job_results`. It can set up an entire fleet without touching a
+shell.
+
+**Each worker** uses `claim_job`, `finish_job`, `release_job`, `fail_job`,
+`heartbeat_job` and `job_status`.
+
+The tool descriptions carry the protocol, because that is all a worker reads:
+claim before starting, **do what the unit's `brief` says rather than what you
+assume the task is**, and **stop when the queue is empty rather than invent
+work** — which is the failure mode worth designing against, since an agent with
+nothing to do will reliably find something, and what it finds is usually a unit
+somebody else has.
 
 ```json
 {"mcpServers": {"work": {"command": "superagentic",
@@ -149,8 +215,9 @@ SQLite over NFS is not safe and this does not pretend otherwise.
 
 **Not exactly-once.** See above. Nothing is.
 
-**It does not know what your work is.** `kind` and `name` are strings you chose
-and this only ever compares them for equality.
+**It does not do your work or check it.** It hands out units and carries your
+instructions verbatim. Whether the agent followed them is between you and the
+agent.
 
 Apache-2.0. Contributions welcome — [CONTRIBUTING.md](CONTRIBUTING.md) says
 what will and will not be accepted before you spend an evening.

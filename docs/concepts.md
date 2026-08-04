@@ -1,7 +1,46 @@
 # Concepts
 
-Four ideas, each of which is a decision someone will want to change. The reason
+Five ideas, each of which is a decision someone will want to change. The reason
 is here so the argument can be had properly.
+
+## A kind is what the work IS; a unit is one piece of it
+
+The queue half of this is unremarkable. The half that matters for a fleet of
+agents is that **a claimed unit arrives with its own instructions**.
+
+A freshly spawned agent has no context. It did not read your orchestration
+code, it cannot see its nine siblings, and it will not remember any of it next
+session. If `claim` hands it `page-0189` and nothing else, the task has to come
+from the prompt that spawned it — and that prompt is invisible to:
+
+- the worker spawned an hour later by a loop that outlived the launch;
+- the worker that inherits a unit a crashed worker dropped;
+- you, next week, trying to work out what these agents were told.
+
+So the instructions live on the **kind**, are read at **claim** time, and are
+handed over with every unit:
+
+```python
+sa.define(conn, "extract",
+    instructions="Read $path. Record every claim it makes, quoting verbatim.",
+    done_when="every claim on the page is recorded, or you have established "
+              "there are none",
+    returns='{"claims": <int>}',
+    tools="the `xrad` MCP server: record_claim")
+```
+
+`done_when` is the one people skip and the one that costs most. Without it each
+worker decides for itself what finished means, and ten agents will produce ten
+standards on the same corpus. Both the CLI and the MCP tool warn when it is
+missing.
+
+Substitution is `string.Template`, not `str.format`, for a specific reason:
+instructions to an agent are full of JSON, and `{"ok": true}` makes `format`
+raise. `$name` is the unit; `$key` is anything in its `meta`; an unrecognised
+`$placeholder` is left alone rather than failing at the moment a worker asks
+for work. Meta values are themselves templated on `$name` first, so
+`meta={"path": "scans/$name.png"}` gives two thousand units their own path
+without building two thousand dicts.
 
 ## A lease, not a lock
 
