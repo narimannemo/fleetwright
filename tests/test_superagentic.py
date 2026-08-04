@@ -1,0 +1,283 @@
+"""The tests that matter here are the ones about failure.
+
+Any queue passes "hand out ten units to two workers." What separates a lease
+table from a broken one is what happens when a worker dies holding work, when a
+slow worker comes back after losing its lease, and when two real OS processes
+race the same file. Those have their own tests below and they are the point.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+import superagentic as sa
+from superagentic.cli import main as cli_main
+from superagentic.mcp import Server
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def conn(tmp_path):
+    return sa.connect(tmp_path / "work.db")
+
+
+class TestQueue:
+    def test_adding_the_same_units_twice_is_a_no_op(self, conn):
+        assert sa.add(conn, "translate", ["p1", "p2"]) == 2
+        # Re-running an enumeration after the corpus grew is the common case.
+        assert sa.add(conn, "translate", ["p1", "p2", "p3"]) == 1
+
+    def test_the_same_name_under_two_kinds_is_two_units(self, conn):
+        sa.add(conn, "translate", ["p1"])
+        assert sa.add(conn, "audit", ["p1"]) == 1
+
+    def test_two_claimers_never_get_the_same_unit(self, conn):
+        sa.add(conn, "x", [f"u{i}" for i in range(10)])
+        a = sa.claim(conn, "x", worker="a", n=4)
+        b = sa.claim(conn, "x", worker="b", n=4)
+        assert len({u.name for u in a} & {u.name for u in b}) == 0
+        assert len(a) == len(b) == 4
+
+    def test_the_queue_running_dry_is_not_an_error(self, conn):
+        sa.add(conn, "x", ["only"])
+        assert sa.claim(conn, "x", worker="a")
+        assert sa.claim(conn, "x", worker="b") == []
+
+    def test_priority_is_honoured(self, conn):
+        sa.add(conn, "x", ["low"])
+        sa.add(conn, "x", ["high"], priority=5)
+        assert sa.claim(conn, "x", worker="w")[0].name == "high"
+
+    def test_claiming_without_a_kind_takes_anything(self, conn):
+        sa.add(conn, "translate", ["a"])
+        sa.add(conn, "audit", ["b"])
+        assert {u.kind for u in sa.claim(conn, worker="w", n=2)} == {"translate", "audit"}
+
+    def test_meta_travels_with_the_unit_and_is_never_inspected(self, conn):
+        sa.add(conn, "x", ["u1"], meta={"url": "s3://b/k", "nested": {"n": 1}})
+        assert sa.claim(conn, "x", worker="w")[0].meta["nested"]["n"] == 1
+
+
+class TestFailure:
+    """A lease is only worth having if these hold."""
+
+    def test_a_crashed_workers_unit_comes_back(self, conn):
+        sa.add(conn, "x", ["u1"])
+        assert sa.claim(conn, "x", worker="dies", lease=0.01)
+        assert sa.claim(conn, "x", worker="b") == [], "still leased, correctly"
+        time.sleep(0.05)
+        # No daemon: the next claimer reclaims on the way in.
+        again = sa.claim(conn, "x", worker="b")
+        assert [u.name for u in again] == ["u1"]
+        assert again[0].attempts == 2
+
+    def test_a_lost_lease_cannot_be_closed_or_extended(self, conn):
+        sa.add(conn, "x", ["u1"])
+        slow = sa.claim(conn, "x", worker="slow", lease=0.01)[0]
+        time.sleep(0.05)
+        sa.claim(conn, "x", worker="fast")
+        assert sa.heartbeat(conn, [slow.unit_id], worker="slow") == 0
+        assert sa.finish(conn, slow.unit_id, worker="slow") is False
+        assert sa.finish(conn, slow.unit_id, worker="fast") is True
+
+    def test_a_heartbeat_keeps_a_slow_worker_from_being_reclaimed(self, conn):
+        sa.add(conn, "x", ["u1"])
+        u = sa.claim(conn, "x", worker="slow", lease=0.05)[0]
+        sa.heartbeat(conn, [u.unit_id], worker="slow", lease=30)
+        time.sleep(0.08)
+        assert sa.claim(conn, "x", worker="other") == []
+
+    def test_a_poison_unit_is_retired_rather_than_re_leased_forever(self, conn):
+        sa.add(conn, "x", ["bad"])
+        for _ in range(3):
+            sa.claim(conn, "x", worker="w", lease=0.01)
+            time.sleep(0.02)
+        assert sa.claim(conn, "x", worker="w") == []
+        assert sa.progress(conn)["x"][sa.FAILED] == 1
+        assert "out of attempts" in sa.failures(conn)[0]["note"]
+
+    def test_failing_keeps_the_reason(self, conn):
+        sa.add(conn, "x", ["u1"])
+        u = sa.claim(conn, "x", worker="w")[0]
+        assert sa.fail(conn, u.unit_id, note="page is blank", worker="w")
+        row = conn.execute("SELECT note, status FROM unit").fetchone()
+        assert row["note"] == "page is blank" and row["status"] == sa.OPEN
+
+    def test_failing_past_the_limit_stops_offering_the_unit(self, conn):
+        sa.add(conn, "x", ["u1"])
+        for _ in range(3):
+            u = sa.claim(conn, "x", worker="w")[0]
+            sa.fail(conn, u.unit_id, note="nope", worker="w")
+        assert sa.claim(conn, "x", worker="w") == []
+
+    def test_releasing_does_not_count_as_a_failure(self, conn):
+        sa.add(conn, "x", ["u1"])
+        for _ in range(5):
+            u = sa.claim(conn, "x", worker="w")[0]
+            sa.release(conn, u.unit_id, worker="w", note="wrong language")
+        # Still claimable. `attempts` still counts hand-outs, which is what
+        # protects against a genuine poison unit.
+        assert sa.claim(conn, "x", worker="w")
+
+    def test_finish_on_an_unknown_unit_is_false_not_an_exception(self, conn):
+        assert sa.finish(conn, "x:nope") is False
+        assert sa.fail(conn, "x:nope", note="n") is False
+
+
+class TestConcurrency:
+    def test_real_processes_racing_one_file_do_not_collide(self, tmp_path):
+        """The only test that proves it.
+
+        In-process claims share a connection and could pass while the
+        cross-process case deadlocks or double-issues. Three interpreters, one
+        file, sixty units, each handed out exactly once.
+        """
+        db = tmp_path / "race.db"
+        conn = sa.connect(db)
+        sa.add(conn, "x", [f"u{i}" for i in range(60)])
+        conn.close()
+
+        src = str(ROOT / "src")
+        prog = (
+            "import sys, json;"
+            f"sys.path.insert(0, {src!r});"
+            "import superagentic as sa;"
+            f"c = sa.connect({str(db)!r});"
+            "print(json.dumps([u.name for u in "
+            "sa.claim(c, 'x', worker=sys.argv[1], n=20)]))"
+        )
+        procs = [subprocess.Popen([sys.executable, "-c", prog, f"w{i}"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True) for i in range(3)]
+        got = []
+        for p in procs:
+            out, err = p.communicate(timeout=90)
+            assert p.returncode == 0, err
+            got.append(json.loads(out))
+        flat = [u for g in got for u in g]
+        assert len(flat) == 60, f"every unit should be handed out once, got {len(flat)}"
+        assert len(set(flat)) == 60, "a unit went to two processes"
+
+    def test_wal_is_on_because_nothing_works_without_it(self, conn):
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] > 0
+
+
+class TestCLI:
+    def test_claim_exits_1_on_an_empty_queue_so_shell_loops_end(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        assert cli_main(["add", "x", "u1", "--db", db]) == 0
+        assert cli_main(["claim", "x", "--db", db]) == 0
+        assert cli_main(["claim", "x", "--db", db]) == 1
+
+    def test_json_output_is_parseable(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "x", "u1", "--db", db])
+        capsys.readouterr()                       # discard `add`'s own line
+        cli_main(["claim", "x", "--db", db, "--json"])
+        out = capsys.readouterr()
+        rows = json.loads(out.out)                # stdout is JSON and nothing else
+        assert out.err == "", "--json must be quiet on both streams"
+        assert rows[0]["unit_id"] == "x:u1"
+
+    def test_done_on_a_lost_lease_exits_nonzero(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "x", "u1", "--db", db])
+        cli_main(["claim", "x", "--db", db, "--worker", "a", "--lease", "0.01"])
+        time.sleep(0.05)
+        cli_main(["claim", "x", "--db", db, "--worker", "b"])
+        assert cli_main(["done", "x:u1", "--db", db, "--worker", "a"]) == 1
+        assert cli_main(["done", "x:u1", "--db", db, "--worker", "b"]) == 0
+
+    def test_status_on_an_empty_db_says_what_to_do_next(self, tmp_path, capsys):
+        cli_main(["status", "--db", str(tmp_path / "w.db")])
+        assert "superagentic add" in capsys.readouterr().out
+
+    def test_the_demo_runs(self, capsys):
+        from superagentic.demo import main as demo
+        assert demo() == 0
+        assert "nobody got the same page" in capsys.readouterr().out
+
+
+class TestMCP:
+    def _server(self, tmp_path):
+        return Server(tmp_path / "w.db")
+
+    def test_tools_are_listed_and_dispatchable(self, tmp_path):
+        s = self._server(tmp_path)
+        listed = s.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        names = {t["name"] for t in listed["result"]["tools"]}
+        assert names == {"claim_job", "finish_job", "release_job", "fail_job",
+                         "heartbeat_job", "job_status"}
+        for n in names:
+            assert callable(getattr(s, n)), f"{n} is advertised but not implemented"
+
+    def test_an_empty_queue_tells_the_agent_to_stop(self, tmp_path):
+        out = self._server(tmp_path).claim_job({})
+        assert out["queue_empty"] is True
+        assert "stop" in out["note"].lower()
+
+    def test_claim_then_finish(self, tmp_path):
+        s = self._server(tmp_path)
+        sa.add(s.conn, "x", ["u1"])
+        got = s.claim_job({"kind": "x"})
+        assert got["units"][0]["name"] == "u1"
+        assert s.finish_job({"unit_id": "x:u1"})["finished"] is True
+
+    def test_a_retried_unit_is_flagged_to_the_agent(self, tmp_path):
+        s = self._server(tmp_path)
+        sa.add(s.conn, "x", ["u1"])
+        s.claim_job({"kind": "x", "lease_seconds": 0.01})
+        time.sleep(0.05)
+        assert "warning" in s.claim_job({"kind": "x"})
+
+    def test_status_shows_other_workers_not_this_one(self, tmp_path):
+        s = self._server(tmp_path)
+        sa.add(s.conn, "x", ["mine", "theirs"])
+        s.claim_job({"kind": "x"})
+        sa.claim(s.conn, "x", worker="someone-else")
+        elsewhere = s.job_status({})["in_progress_elsewhere"]
+        assert [u["name"] for u in elsewhere] == ["theirs"]
+
+    def test_a_tool_error_is_returned_not_raised(self, tmp_path):
+        s = self._server(tmp_path)
+        r = s.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": {"name": "finish_job", "arguments": {}}})
+        assert r["result"]["isError"] is True
+
+    def test_unknown_tools_are_refused(self, tmp_path):
+        r = self._server(tmp_path).handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "connect", "arguments": {}}})
+        assert r["error"]["code"] == -32601, "no reaching non-tool attributes"
+
+
+class TestDocs:
+    def test_every_readme_link_resolves(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        missing = [t for t in re.findall(r"\]\(([^)#:]+\.md)\)", readme)
+                   if not (ROOT / t).exists()]
+        assert not missing, f"README links to missing files: {missing}"
+
+    def test_the_reference_matches_the_cli(self):
+        from superagentic.cli import build_parser
+        real = set(build_parser()._subparsers._group_actions[0].choices)
+        doc = set(re.findall(r"^superagentic (\w+)",
+                             (ROOT / "docs" / "reference.md").read_text(encoding="utf-8"),
+                             re.M))
+        assert not doc - real, f"documented but absent: {sorted(doc - real)}"
+        assert not real - doc, f"undocumented commands: {sorted(real - doc)}"
+
+    def test_the_docs_do_not_promise_exactly_once(self):
+        for f in (ROOT / "docs").glob("*.md"):
+            t = f.read_text(encoding="utf-8").lower()
+            assert "exactly-once" not in t or "not exactly-once" in t \
+                or "cannot" in t, f"{f.name} may be overpromising delivery"

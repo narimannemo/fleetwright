@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_call:          # the release workflow reuses this rather than
+                          # duplicating it, so a tag cannot ship something
+                          # the matrix never ran.
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  python: "3.11" }
+          - { os: ubuntu-latest,  python: "3.12" }
+          - { os: ubuntu-latest,  python: "3.13" }
+          # macOS and Windows are not paranoia. This library depends on SQLite
+          # locking behaviour and on subprocess semantics, and both differ
+          # across platforms in ways only a runner finds.
+          - { os: macos-latest,   python: "3.11" }
+          - { os: windows-latest, python: "3.11" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v5
+      - run: uv pip install --system ".[dev]"
+      - run: ruff check .
+      - run: pytest -q
+      - run: superagentic demo
+      - name: a real four-worker fleet, end to end
+        shell: bash
+        run: |
+          python -c "print('\n'.join(f'u{i}' for i in range(40)))" > units.txt
+          superagentic add work --from-file units.txt --db ci.db
+          for _ in 1 2 3 4; do
+            ( while u=$(superagentic claim work --json --db ci.db); do
+                id=$(python -c "import json,sys;print(json.loads(sys.argv[1])[0]['unit_id'])" "$u")
+                superagentic done "$id" --db ci.db >/dev/null
+              done ) &
+          done
+          wait
+          superagentic status --db ci.db
+          python - <<'PY'
+          import superagentic as sa
+          p = sa.progress(sa.connect("ci.db"))["work"]
+          assert p["done"] == 40 and p["open"] == 0, p
+          print("40/40 done, no duplicates")
+          PY
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - run: uvx twine check dist/*
+      - name: the sdist must be able to test itself
+        run: |
+          mkdir -p /tmp/sdist
+          tar -xzf dist/*.tar.gz -C /tmp/sdist --strip-components=1
+          cd /tmp/sdist
+          uv pip install --system ".[dev]"
+          pytest -q
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/ }

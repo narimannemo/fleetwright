@@ -1,0 +1,69 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  # Never publish something the matrix has not run.
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: astral-sh/setup-uv@v5
+      - name: the tag and __version__ must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          have=$(python -c "import re,pathlib;print(re.search(r'__version__ = \"(.*)\"', pathlib.Path('src/superagentic/__init__.py').read_text())[1])")
+          [ "$tag" = "$have" ] || { echo "tag $tag != __version__ $have"; exit 1; }
+          grep -q "## \[$tag\]" CHANGELOG.md || { echo "no CHANGELOG section for $tag"; exit 1; }
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/ }
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/superagentic
+    permissions:
+      # The only credential. No API token is stored anywhere: PyPI verifies the
+      # workflow identity itself, and the credential lasts minutes.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist/ }
+      # Attestations are on by default under Trusted Publishing, so the
+      # published files carry provenance back to this workflow and this commit.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist/ }
+      - name: notes from the CHANGELOG, not from commit subjects
+        run: |
+          python - <<'PY' > notes.md
+          import os, pathlib, re
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          m = re.search(rf"## \[{re.escape(tag)}\][^\n]*\n(.*?)(?=\n## \[|\Z)", text, re.S)
+          print((m[1] if m else "").strip())
+          PY
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --notes-file notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
