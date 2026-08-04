@@ -81,6 +81,14 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv build
       - run: uvx twine check dist/*
+      - name: the package must be Apache-2.0 throughout
+        run: |
+          # ee/ is not Apache-2.0. Shipping it inside an Apache-2.0 wheel is
+          # how a licence question becomes a licence problem for someone who
+          # never looked at the repository.
+          ! tar -tzf dist/*.tar.gz | grep "/ee/"
+          ! unzip -l dist/*.whl | grep -E "(^| )ee/"
+          echo "no ee/ in either artefact"
       - name: the sdist must be able to test itself
         run: |
           mkdir -p /tmp/sdist

@@ -1,0 +1,25 @@
+superagentic Enterprise Edition
+Copyright (c) 2026 Nariman Arian. All rights reserved.
+
+This directory is NOT covered by the Apache License 2.0 that governs the rest
+of this repository. See ../LICENSING.md for the boundary and the reasoning.
+
+The source in this directory is made available so that you can read it, audit
+it, and verify what it does with your data. That is the only right granted
+without a licence agreement.
+
+You may:
+  - read this source, and audit it;
+  - run it for the purpose of evaluating whether to buy a licence.
+
+You may not, without a written licence agreement:
+  - use it in production;
+  - copy, modify, or distribute it;
+  - offer it to others, whether as a service or otherwise;
+  - remove or circumvent any licence check.
+
+Nothing here restricts the rest of the repository. Everything outside this
+directory remains Apache-2.0, permanently, including the right to run it, to
+modify it, and to sell a service built on it.
+
+For a licence: narimannemo@gmail.com

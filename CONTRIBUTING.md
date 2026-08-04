@@ -22,6 +22,37 @@
   worker and a promise of it in the docs is worse than the current honesty.
 - **Runtime dependencies.** There are none. That is a feature and it is not
   negotiable for a small convenience.
+- **Anything into `ee/`.** It takes no outside contributions, so that the rest
+  of the project needs no CLA. If you want to build one of the things listed in
+  [ee/README.md](ee/README.md), say so first — the right answer is often that
+  it belongs in the Apache core instead.
+
+## Licensing and the DCO
+
+Contributions go to the **Apache-2.0 core** — everything outside `ee/`. See
+[LICENSING.md](LICENSING.md) for why that directory exists and where the line
+is.
+
+Sign off your commits:
+
+```bash
+git commit -s -m "..."
+```
+
+That adds a `Signed-off-by:` line, which is the
+[Developer Certificate of Origin](https://developercertificate.org/): you are
+saying you wrote it, or have the right to submit it. **It is not a copyright
+assignment.** You keep your copyright and it stays Apache-2.0.
+
+There is deliberately **no contributor licence agreement**, and there will not
+be one. A CLA exists so a maintainer can relicense your work later; `ee/`
+accepts no outside contributions, which removes the need entirely. Nobody signs
+away rights here so that one directory can be commercial.
+
+### Developer Certificate of Origin
+
+By signing off you certify the [DCO 1.1](https://developercertificate.org/) —
+in short, that the contribution is yours to give.
 
 ## Working on it
 

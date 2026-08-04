@@ -1156,3 +1156,63 @@ class TestSkillRegistry:
                              "done_when": "d", "skills": ["ghost"]})
         assert out["unregistered_skills"] == ["ghost"]
         assert "register_skill" in out["hint"]
+
+
+class TestLicenceBoundary:
+    """Open core only works if the boundary is enforced, not just described."""
+
+    def test_the_published_package_is_apache_only(self):
+        """`ee/` must never end up inside an Apache-2.0 wheel or sdist.
+
+        Shipping a differently-licensed directory inside the package is how a
+        licence question becomes a licence problem, months later, for someone
+        who never looked at the repository.
+        """
+        import tarfile
+        import tomllib
+        import zipfile
+        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        sdist = cfg["tool"]["hatch"]["build"]["targets"]["sdist"]
+        inc = sdist["include"]
+        assert not any(i == "ee" or i.startswith("ee/") for i in inc), inc
+        # `include` alone does NOT keep it out: hatchling collects licence
+        # files from anywhere in the tree as metadata, so ee/LICENSE shipped
+        # anyway. Only the explicit exclude stops it.
+        assert "ee" in sdist.get("exclude", []), "no exclude for ee/"
+        pkgs = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
+        assert pkgs == ["src/superagentic"], pkgs
+
+        # And check the ARTEFACTS when they exist, because the config passing
+        # is what let this through the first time.
+        for tgz in (ROOT / "dist").glob("*.tar.gz"):
+            with tarfile.open(tgz) as t:
+                bad = [n for n in t.getnames() if "/ee/" in n]
+            assert not bad, f"{tgz.name} ships {bad}"
+        for whl in (ROOT / "dist").glob("*.whl"):
+            with zipfile.ZipFile(whl) as z:
+                bad = [n for n in z.namelist() if n.startswith("ee/") or "/ee/" in n]
+            assert not bad, f"{whl.name} ships {bad}"
+
+    def test_no_import_of_ee_from_the_core(self):
+        """The core must run complete without `ee/`. If it imports from there,
+        the Apache-2.0 half is not actually a working tool."""
+        for f in (ROOT / "src" / "superagentic").glob("*.py"):
+            src = f.read_text(encoding="utf-8")
+            assert "import ee" not in src and "from ee" not in src, f.name
+
+    def test_the_boundary_is_written_down_in_both_directions(self):
+        lic = (ROOT / "LICENSING.md").read_text(encoding="utf-8")
+        ee = (ROOT / "ee" / "LICENSE").read_text(encoding="utf-8")
+        # It must say what you CAN do, not only what you cannot.
+        assert "Apache-2.0" in lic and "ee/" in lic
+        assert "Nothing here restricts the rest of the repository" in ee
+        # And it must promise the core is not clawed back later.
+        assert "never move" in lic.lower() or "stays there" in lic.lower()
+
+    def test_there_is_no_cla_only_a_dco(self):
+        c = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        assert "Developer Certificate of Origin" in c
+        assert "no contributor licence agreement" in c.lower()
+
+    def test_the_root_licence_is_still_apache(self):
+        assert "Apache License" in (ROOT / "LICENSE").read_text(encoding="utf-8")

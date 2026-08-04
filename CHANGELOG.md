@@ -5,6 +5,34 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.9.0] — 2026-08-04
+
+### Changed
+
+- **Open core.** Everything in this repository is Apache-2.0 **except `ee/`**,
+  which is currently empty. [LICENSING.md](LICENSING.md) draws the line and
+  argues for it. This is the shape Langfuse, GitLab and Grafana use.
+  Apache-2.0 explicitly keeps the right to run it, modify it, and **sell a
+  service built on it** — that is not being taken away, and the versions
+  already published could not be taken back in any case.
+- **The boundary is a rule, not a mood.** `ee/` is for what an organisation
+  needs and one person never misses — SSO, audit log, RBAC, retention,
+  alerting. The core must be a complete tool on its own: a fleet coordinator
+  that cannot coordinate a fleet without a licence is a demo with a paywall.
+  **Nothing already released under Apache-2.0 will move into `ee/`.**
+- **DCO, and deliberately no CLA.** `ee/` accepts no outside contributions,
+  which removes the reason a CLA would exist. Nobody signs away rights so that
+  one directory can be commercial.
+
+### Fixed
+
+- **`ee/LICENSE` was shipping inside the Apache-2.0 sdist.** Hatchling collects
+  licence files from anywhere in the tree as metadata, so listing `ee` nowhere
+  in `include` was not enough — an explicit `exclude` is what keeps it out.
+  Found by inspecting the built tarball; the test that was supposed to prevent
+  it had only read the config and passed. It now opens the artefacts, and CI
+  greps them too.
+
 ## [0.8.0] — 2026-08-04
 
 ### Added

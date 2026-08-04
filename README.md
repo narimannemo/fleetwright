@@ -278,5 +278,10 @@ SQLite over NFS is not safe and this does not pretend otherwise.
 instructions verbatim. Whether the agent followed them is between you and the
 agent.
 
-Apache-2.0. Contributions welcome — [CONTRIBUTING.md](CONTRIBUTING.md) says
-what will and will not be accepted before you spend an evening.
+**Apache-2.0**, including the right to run it, modify it, and sell a service
+built on it. The `ee/` directory is the one exception and is currently empty —
+[LICENSING.md](LICENSING.md) draws the line and argues for it.
+
+Contributions welcome under the DCO, no CLA —
+[CONTRIBUTING.md](CONTRIBUTING.md) says what will and will not be accepted
+before you spend an evening.

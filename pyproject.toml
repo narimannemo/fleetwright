@@ -50,9 +50,18 @@ packages = ["src/superagentic"]
 # Everything the README links to must be in here, or the doc tests fail inside
 # the sdist -- which is the point of running them there. The repo and the
 # tarball are different filesystems and only one of them is what users get.
+# `ee/` is deliberately absent. It is not Apache-2.0, and shipping a
+# differently-licensed directory inside an Apache-2.0 wheel is how a licence
+# question becomes a licence problem. The published package is Apache-2.0
+# throughout.
 include = ["src/superagentic", "tests", "examples", "docs", "packaging",
-           "skills",
-           "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md"]
+           "skills", "README.md", "LICENSE", "LICENSING.md", "CHANGELOG.md",
+           "CONTRIBUTING.md"]
+# `include` is not enough. Hatchling collects licence files from anywhere in
+# the tree as metadata, so ee/LICENSE landed in the sdist even though `ee` was
+# never listed. An explicit exclude is what actually keeps it out — verified by
+# inspecting the built tarball, not by reading this file.
+exclude = ["ee", "ee/**"]
 
 [tool.ruff]
 line-length = 100
