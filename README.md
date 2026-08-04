@@ -206,6 +206,7 @@ See [MCP](docs/mcp.md).
 | [MCP](docs/mcp.md) | wiring it to Claude Code, Cursor, or your own agent |
 | [Reference](docs/reference.md) | every command and the Python API |
 | [Packaging](packaging/README.md) | uv, Homebrew, pip — and which to use |
+| [Skill](skills/README.md) | drop-in Claude Code skill, so an agent knows how to run a fleet |
 
 ## What it is not
 

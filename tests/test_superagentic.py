@@ -389,6 +389,34 @@ class TestDocs:
         assert not doc - real, f"documented but absent: {sorted(doc - real)}"
         assert not real - doc, f"undocumented commands: {sorted(real - doc)}"
 
+    def test_the_skill_only_uses_commands_that_exist(self):
+        """The skill teaches agents shell commands. If one is renamed, the
+        skill goes stale silently and every agent that reads it runs a command
+        that does not exist."""
+        from superagentic.cli import build_parser
+        real = set(build_parser()._subparsers._group_actions[0].choices)
+        text = (ROOT / "skills" / "superagentic" / "SKILL.md").read_text(encoding="utf-8")
+        used = set(re.findall(r"superagentic (\w+)", text)) - {"serve"}
+        assert not used - real, f"skill uses commands that do not exist: {sorted(used - real)}"
+
+    def test_the_skill_names_every_mcp_tool_correctly(self):
+        from superagentic.mcp import _tools
+        real = {t["name"] for t in _tools()}
+        text = (ROOT / "skills" / "superagentic" / "SKILL.md").read_text(encoding="utf-8")
+        named = set(re.findall(r"`(\w+_(?:job|jobs|kind|results|status))`", text))
+        assert not named - real, f"skill names tools that do not exist: {sorted(named - real)}"
+
+    def test_the_skill_has_the_frontmatter_that_makes_it_loadable(self):
+        text = (ROOT / "skills" / "superagentic" / "SKILL.md").read_text(encoding="utf-8")
+        assert text.startswith("---\n"), "no frontmatter; the skill will not load"
+        fm = text.split("---", 2)[1]
+        assert re.search(r"^name: superagentic$", fm, re.M)
+        desc = re.search(r"^description: (.+)$", fm, re.M)
+        assert desc, "no description — nothing decides when to offer the skill"
+        # The description is the only thing that decides whether the skill is
+        # surfaced. One that does not say WHEN to use it never gets loaded.
+        assert "Use when" in desc[1] or "use when" in desc[1]
+
     def test_the_docs_do_not_promise_exactly_once(self):
         for f in (ROOT / "docs").glob("*.md"):
             t = f.read_text(encoding="utf-8").lower()

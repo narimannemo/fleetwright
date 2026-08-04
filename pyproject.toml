@@ -51,6 +51,7 @@ packages = ["src/superagentic"]
 # the sdist -- which is the point of running them there. The repo and the
 # tarball are different filesystems and only one of them is what users get.
 include = ["src/superagentic", "tests", "examples", "docs", "packaging",
+           "skills",
            "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md"]
 
 [tool.ruff]
