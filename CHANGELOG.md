@@ -5,6 +5,34 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.4.0] — 2026-08-04
+
+### Added
+
+- **A sidebar.** Projects at the top, runs below, session at the bottom;
+  detail on the right. Selecting a run scopes every panel and the selection is
+  in the URL, so a scoped view can be sent to someone.
+- **Projects.** A project *is* a database — `--project PATH` (repeatable, and a
+  directory expands to the `*.db` in it). No project table: putting one inside
+  a database would make that file the registry for the others, so moving it
+  would break the rest.
+- **An access token, with sign in and sign out.** `--token`, or better
+  `SUPERAGENTIC_TOKEN`, since a flag lands in shell history and in `ps`.
+  Compared with `hmac.compare_digest`; session cookie is `HttpOnly` and
+  `SameSite=Strict`; nothing is stored on disk.
+- **The server refuses to bind off-loopback without a token**, and warns every
+  time it binds off-loopback anyway. That refusal is the security design: there
+  is no TLS here, and a login form whose real effect is to make an unencrypted
+  service feel safe is worse than none. It is a shared token, not user
+  accounts — there is no user model in this library and inventing one for a
+  dashboard would be pretending to an identity system that does not exist.
+
+### Fixed
+
+- **A static snapshot rendered an empty sidebar.** `projects`, `project` and
+  `auth` were added by the request handler and so were missing from the file
+  `--out` writes. Moved into the shared payload, with a test.
+
 ## [0.3.0] — 2026-08-04
 
 ### Added

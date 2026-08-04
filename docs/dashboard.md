@@ -1,9 +1,63 @@
 # Watching a fleet
 
 ```bash
-superagentic dashboard --db work.db            # http://127.0.0.1:8787
-superagentic dashboard --db work.db --out fleet.html
+superagentic dashboard --db work.db                     # http://127.0.0.1:8787
+superagentic dashboard --db a.db --project ./queues     # several projects
+superagentic dashboard --db work.db --out fleet.html    # a static snapshot
 ```
+
+The layout is a sidebar and a detail pane: **projects** at the top, **runs**
+below them, and the session at the bottom. Selecting a run scopes every panel
+in the detail pane to it, and the selection lives in the URL so it can be sent
+to someone.
+
+## Projects are databases
+
+A project *is* a SQLite file — there is no project table and no registry.
+Putting one inside a database would make that file the index for the others, so
+moving or deleting it would break the rest; the filename is already the name
+people use.
+
+```bash
+superagentic dashboard --db kircher.db --project plutarch.db
+superagentic dashboard --db kircher.db --project ./queues   # a directory of them
+```
+
+## The login, and what it is not
+
+```bash
+export SUPERAGENTIC_TOKEN="$(openssl rand -hex 24)"
+superagentic dashboard --db work.db --host 0.0.0.0
+```
+
+It is a **shared access token, not user accounts.** There is no user model in
+this library and inventing one for a dashboard would be pretending to an
+identity system that does not exist. The token is given at startup, never
+stored, compared with `hmac.compare_digest` so a wrong one does not leak its
+correct prefix through timing, and exchanged for a session cookie that is
+`HttpOnly` and `SameSite=Strict`.
+
+**There is no TLS.** On a network the token travels in clear text. So:
+
+> The server **refuses to bind to anything but loopback unless a token is
+> set**, and warns on every start when it binds off-loopback anyway.
+
+```
+$ superagentic dashboard --host 0.0.0.0
+refusing to bind 0.0.0.0 without --token.
+  This serves queue contents and machine names over plain HTTP.
+  Either keep it on 127.0.0.1, or set a token:
+      superagentic dashboard --host 0.0.0.0 --token "$(openssl rand -hex 24)"
+```
+
+That refusal is the entire security design. A login form whose real effect is
+to make an unencrypted service *feel* safe is worse than no login form — it is
+the reason someone passes `--host 0.0.0.0` once and forgets. Prefer the
+environment variable over `--token`: a flag lands in shell history and in `ps`
+output for anyone else on the box.
+
+For anything beyond a trusted network, put it behind a reverse proxy that
+terminates TLS. This does not try to be that proxy.
 
 ## What it is for
 

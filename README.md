@@ -244,9 +244,13 @@ for how long**, duration p50 against p95, and a stripe on any unit held past
 three times the p95 — because "is anyone stuck?" is the question, and a raw
 duration column does not answer it.
 
-Served from `http.server`, CSS and JS inline, SVG drawn by hand. No framework,
-no build step, nothing fetched. Read-only, so pointing it at a live run cannot
-disturb the run, and bound to loopback because it has no authentication.
+A sidebar switches between **projects** (each is a database) and **runs**;
+selecting one scopes every panel. Served from `http.server`, CSS and JS inline,
+SVG drawn by hand. No framework, no build step, nothing fetched.
+
+Read-only, so pointing it at a live run cannot disturb the run. There is an
+optional access token with sign in and sign out — and because there is no TLS,
+**the server refuses to bind off-loopback unless one is set.**
 
 ## Documentation
 

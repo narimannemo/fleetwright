@@ -748,3 +748,96 @@ class TestDashboard:
         dashboard.snapshot(db)
         assert sa.progress(sa.connect(db))["x"][sa.OPEN] == 1
         assert len(db.read_bytes()) >= len(before)
+
+
+class TestDashboardAuth:
+    """The login exists to make one mistake impossible, not to look secure."""
+
+    def _serve(self, tmp_path, **kw):
+        from superagentic import dashboard
+        db = tmp_path / "p.db"
+        sa.add(sa.connect(db), "x", ["a"])
+        return dashboard, db
+
+    def test_binding_off_loopback_without_a_token_is_refused(self, tmp_path):
+        dashboard, db = self._serve(tmp_path)
+        with pytest.raises(SystemExit) as e:
+            dashboard.serve(db, host="0.0.0.0", open_browser=False)
+        # An error that only says no is half an error: it has to name the
+        # flag that fixes it and the host that triggered it.
+        assert "--token" in str(e.value) and "0.0.0.0" in str(e.value)
+
+    def test_loopback_without_a_token_is_allowed(self, tmp_path, monkeypatch):
+        dashboard, db = self._serve(tmp_path)
+        started = {}
+
+        class FakeServer:
+            def __init__(self, addr, handler):
+                started["addr"] = addr
+                started["handler"] = handler
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def serve_forever(self):
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(dashboard, "ThreadingHTTPServer", FakeServer)
+        dashboard.serve(db, host="127.0.0.1", open_browser=False)
+        assert started["addr"] == ("127.0.0.1", 8787)
+        assert started["handler"].token is None
+
+    def test_a_wrong_token_is_compared_in_constant_time(self):
+        # Not a timing measurement -- those are flaky. This asserts the code
+        # uses compare_digest, because `==` on a secret leaks its prefix.
+        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        assert "hmac.compare_digest" in src
+        assert "== self.token" not in src and "self.token ==" not in src
+
+    def test_the_session_cookie_is_httponly_and_samesite(self):
+        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        assert "HttpOnly" in src and "SameSite=Strict" in src
+
+    def test_projects_are_databases_and_a_directory_expands(self, tmp_path):
+        from superagentic import dashboard
+        (tmp_path / "d").mkdir()
+        for n in ("alpha", "beta"):
+            sa.connect(tmp_path / "d" / f"{n}.db")
+        sa.connect(tmp_path / "solo.db")
+        got = dashboard._projects([tmp_path / "d", tmp_path / "solo.db"])
+        assert set(got) == {"alpha", "beta", "solo"}
+
+    def test_the_page_renders_a_sidebar_and_a_gate(self, tmp_path):
+        from superagentic import dashboard
+        db = tmp_path / "p.db"
+        sa.add(sa.connect(db), "x", ["a"])
+        html = dashboard.snapshot(db)
+        for hook in ('class="shell"', 'id="gate"', 'id="projects"',
+                     'id="sideruns"', 'id="logout"'):
+            assert hook in html, hook
+
+    def test_a_snapshot_carries_its_own_project(self, tmp_path):
+        # Without this the static file renders an empty sidebar: `projects`
+        # was only ever added by the request handler.
+        from superagentic import dashboard
+        db = tmp_path / "kircher.db"
+        sa.add(sa.connect(db), "x", ["a"])
+        html = dashboard.snapshot(db)
+        d = json.loads(next(ln for ln in html.splitlines()
+                            if ln.startswith("const DATA = "))
+                       [len("const DATA = "):].rsplit(";", 1)[0])
+        assert d["projects"] == ["kircher"] and d["project"] == "kircher"
+        assert d["auth"] is False
+
+    def test_a_snapshot_never_asks_anyone_to_log_in(self, tmp_path):
+        # There is no server behind a static file: showing a login form on one
+        # would be asking for a credential nothing can check.
+        from superagentic import dashboard
+        db = tmp_path / "p.db"
+        sa.add(sa.connect(db), "x", ["a"])
+        html = dashboard.snapshot(db)
+        assert 'const DATA = {' in html
+        assert 'if (DATA) {' in html and '$("#shell").hidden = false;' in html

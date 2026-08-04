@@ -21,13 +21,28 @@ and JS inline, and SVG drawn by hand rather than a charting library.
 
 **Read-only.** It opens the database, reads, and serves. Nothing here claims,
 finishes or deletes, so pointing it at a live run cannot disturb the run.
+
+**About the login.** It is a shared access token, not user accounts — there is
+no user model in this library and inventing one for a dashboard would be
+pretending to an identity system that does not exist. The token is compared in
+constant time and never stored: it is given at startup and lives in the
+process.
+
+There is no TLS. On a network, an access token typed into a form travels in
+clear text, so the server **refuses to bind to anything but loopback unless a
+token is set**, and warns every time it binds off-loopback anyway. A login form
+that makes an unencrypted service feel safe is worse than no login form.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
+import secrets
+import time
 import urllib.parse
 import webbrowser
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -89,6 +104,50 @@ PAGE = """<!doctype html>
   --failed-bg:#fdf2f2; --warn-bg:#fdf8ee; --warn:#8a6416;
 }
 * { box-sizing:border-box; }
+.shell { display:grid; grid-template-columns:248px minmax(0,1fr); min-height:100vh; }
+aside { background:var(--surface); border-right:1px solid var(--line);
+        display:flex; flex-direction:column; gap:18px; padding:18px 0 14px;
+        position:sticky; top:0; height:100vh; overflow-y:auto; }
+.brand { display:flex; align-items:center; gap:9px; padding:0 18px;
+         font-weight:660; font-size:14px; letter-spacing:-.01em; }
+.brand .mark { width:3px; height:15px; border-radius:2px; background:var(--accent); }
+.navgroup { display:flex; flex-direction:column; gap:3px; }
+.navgroup.grow { flex:1; min-height:0; }
+.navlabel { font-size:10px; text-transform:uppercase; letter-spacing:.08em;
+            color:var(--ink3); font-weight:660; padding:0 18px 5px; }
+.navitem { display:flex; align-items:center; gap:8px; padding:6px 18px;
+           cursor:pointer; font-size:13px; color:var(--ink2); border:0;
+           background:none; width:100%; text-align:left; font-family:inherit;
+           border-left:2px solid transparent; }
+.navitem:hover { background:var(--raise); color:var(--ink); }
+.navitem.on { color:var(--ink); font-weight:620; border-left-color:var(--accent);
+              background:var(--raise); }
+.navitem .meta { margin-left:auto; font-size:11px; color:var(--ink3);
+                 font-variant-numeric:tabular-nums; }
+.navitem .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.who { margin-top:auto; padding:12px 18px 0; border-top:1px solid var(--line);
+       display:flex; align-items:center; gap:10px; }
+.body { min-width:0; }
+@media (max-width:820px) {
+  .shell { grid-template-columns:1fr; }
+  aside { position:static; height:auto; }
+  .navgroup.grow { flex:none; }
+}
+#gate { position:fixed; inset:0; display:grid; place-items:center;
+        background:var(--ground); z-index:20; padding:20px; }
+.gatebox { background:var(--surface); border:1px solid var(--line);
+           border-radius:12px; padding:28px; width:min(360px,100%);
+           display:flex; flex-direction:column; gap:12px; }
+.gatebox h1 { font-size:15px; }
+.gatebox input { font:inherit; padding:9px 11px; border-radius:7px;
+                 border:1px solid var(--line2); background:var(--ground);
+                 color:var(--ink); }
+.gatebox input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.gatebox button { font:inherit; font-weight:620; padding:9px 11px; border:0;
+                  border-radius:7px; background:var(--accent); color:#fff;
+                  cursor:pointer; }
+.gateerr { color:var(--failed); font-size:12px; margin:0; }
+.tiny { font-size:11px; line-height:1.45; margin:2px 0 0; }
 body { margin:0; background:var(--ground); color:var(--ink);
        font:14px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;
        -webkit-font-smoothing:antialiased; }
@@ -97,8 +156,8 @@ body { margin:0; background:var(--ground); color:var(--ink);
    system and it is what the subject is made of. */
 .mono { font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
         font-size:12.5px; letter-spacing:-.01em; }
-header { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
-         padding:18px 24px 16px; border-bottom:1px solid var(--line);
+header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;
+         padding:18px 24px 14px; border-bottom:1px solid var(--line);
          background:var(--surface); }
 h1 { font-size:14px; margin:0; font-weight:640; letter-spacing:-.005em;
      text-wrap:balance; display:flex; align-items:center; gap:9px; }
@@ -108,7 +167,7 @@ h1::before { content:""; width:3px; height:15px; border-radius:2px;
 .live { display:inline-flex; align-items:center; gap:7px; color:var(--ink3);
         font-size:12px; margin-left:auto; font-variant-numeric:tabular-nums; }
 .dot { width:7px; height:7px; border-radius:50%; background:var(--open); }
-main { padding:20px 24px 48px; display:grid; gap:14px; max-width:1200px; }
+main { padding:18px 24px 48px; display:grid; gap:14px; max-width:1200px; }
 .tiles { display:grid; gap:12px;
          grid-template-columns:repeat(auto-fit,minmax(148px,1fr)); }
 .card { background:var(--surface); border:1px solid var(--line);
@@ -176,16 +235,46 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 @media (prefers-reduced-motion:reduce) { * { transition:none !important; } }
 </style>
 
+<div id="gate" hidden>
+  <form class="gatebox" id="loginform">
+    <h1>superagentic</h1>
+    <p class="muted">This dashboard is protected by an access token.</p>
+    <input type="password" id="token" placeholder="access token" autocomplete="off"
+           autofocus>
+    <button type="submit">Sign in</button>
+    <p class="gateerr" id="gateerr" hidden>That token was not accepted.</p>
+    <p class="muted tiny">Served over plain HTTP — this token is not encrypted
+      in transit. Use it on a trusted network only.</p>
+  </form>
+</div>
+
+<div class="shell" id="shell" hidden>
+  <aside>
+    <div class="brand"><span class="mark"></span>superagentic</div>
+
+    <div class="navgroup">
+      <div class="navlabel">Projects</div>
+      <div id="projects"></div>
+    </div>
+
+    <div class="navgroup grow">
+      <div class="navlabel">Runs <span id="runcount" class="muted"></span></div>
+      <div id="sideruns"></div>
+    </div>
+
+    <div class="who">
+      <span class="live"><span class="dot" id="dot"></span><span id="ago">—</span></span>
+      <button class="link" id="logout" hidden>Sign out</button>
+    </div>
+  </aside>
+
+  <div class="body">
 <header>
-  <h1>__TITLE__</h1>
+  <h1 id="pagetitle">Overview</h1>
   <span class="sub mono" id="db"></span>
-  <span class="live"><span class="dot" id="dot"></span><span id="ago">—</span></span>
+  <span class="live"><span class="dot" id="dot2"></span><span id="ago2">—</span></span>
 </header>
 <main>
-  <div class="card wide" id="runscard">
-    <h2>Runs</h2>
-    <div class="scroll" id="runs"></div>
-  </div>
   <div id="scope"></div>
   <div class="tiles" id="tiles"></div>
   <div class="card wide">
@@ -200,7 +289,13 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
     <div class="card"><h2>Workers</h2><div class="scroll" id="workers"></div></div>
     <div class="card"><h2>Could not finish</h2><div class="scroll" id="failures"></div></div>
   </div>
+  <div class="card wide" id="runscard">
+    <h2>All runs</h2>
+    <div class="scroll" id="runs"></div>
+  </div>
 </main>
+  </div>
+</div>
 <div class="tip" id="tip"></div>
 
 <script>
@@ -230,14 +325,61 @@ function ago(s) {
   return Math.round(d / 86400) + "d ago";
 }
 
-let SELECTED = new URLSearchParams(location.search).get("run");
+const params = new URLSearchParams(location.search);
+let SELECTED = params.get("run");
+let PROJECT = params.get("project");
+
+function syncUrl() {
+  const u = new URL(location.href);
+  SELECTED ? u.searchParams.set("run", SELECTED) : u.searchParams.delete("run");
+  PROJECT ? u.searchParams.set("project", PROJECT) : u.searchParams.delete("project");
+  history.replaceState(null, "", u);
+}
 
 function select(run) {
   SELECTED = run;
-  const u = new URL(location.href);
-  run ? u.searchParams.set("run", run) : u.searchParams.delete("run");
-  history.replaceState(null, "", u);
+  syncUrl();
   if (!DATA) poll();
+}
+
+function selectProject(name) {
+  if (name === PROJECT) return;
+  PROJECT = name;
+  // A run id belongs to one database. Carrying it across would scope the new
+  // project to a run it has never heard of and show an empty page.
+  SELECTED = null;
+  syncUrl();
+  if (!DATA) poll();
+}
+
+function renderSidebar(d) {
+  const ps = d.projects || [];
+  $("#projects").innerHTML = ps.length ? ps.map(n =>
+    `<button class="navitem ${n === d.project ? "on" : ""}" data-p="${esc(n)}">
+       <span class="lbl">${esc(n)}</span></button>`).join("")
+    : `<div class="navlabel">none</div>`;
+  $("#projects").querySelectorAll("[data-p]").forEach(b =>
+    b.addEventListener("click", () => selectProject(b.dataset.p)));
+
+  const rs = d.runs || [];
+  $("#runcount").textContent = rs.length ? `(${rs.length})` : "";
+  $("#sideruns").innerHTML =
+    `<button class="navitem ${!SELECTED ? "on" : ""}" data-r="">
+       <span class="lbl">All runs</span>
+       <span class="meta">${(d.totals.all || 0).toLocaleString()}</span></button>`
+    + rs.map(r => `<button class="navitem ${r.run_id === SELECTED ? "on" : ""}"
+        data-r="${esc(r.run_id)}" title="${esc(r.label || r.run_id)}">
+        ${r.running ? '<span class="live-dot"></span>' : ""}
+        <span class="lbl">${esc(r.label || r.run_id)}</span>
+        <span class="meta">${r.done}/${r.units}</span></button>`).join("");
+  $("#sideruns").querySelectorAll("[data-r]").forEach(b =>
+    b.addEventListener("click", () => select(b.dataset.r || null)));
+
+  $("#db").textContent = d.project || "";
+  const sel = rs.find(r => r.run_id === SELECTED);
+  $("#pagetitle").textContent = sel ? (sel.label || sel.run_id) : "Overview";
+  const lo = $("#logout");
+  lo.hidden = !d.auth;
 }
 
 function renderRuns(d) {
@@ -286,6 +428,9 @@ function renderRuns(d) {
 }
 
 function render(d) {
+  $("#gate").hidden = true;
+  $("#shell").hidden = false;
+  renderSidebar(d);
   renderRuns(d);
   const t = d.totals, pct = t.all ? Math.round(100 * t.done / t.all) : 0;
   $("#tiles").innerHTML = [
@@ -410,20 +555,53 @@ function render(d) {
       <td>${esc(f.note || "no reason recorded")}</td></tr>`).join("")}</table>`
     : `<div class="empty">Nothing has been given up on.</div>`;
 
-  $("#ago").textContent = new Date(d.now * 1000).toLocaleTimeString();
-  $("#dot").style.background = t.leased ? "var(--leased)" : "var(--open)";
+  const when = new Date(d.now * 1000).toLocaleTimeString();
+  const colour = t.leased ? "var(--leased)" : "var(--open)";
+  for (const [a, b] of [["#ago", "#dot"], ["#ago2", "#dot2"]]) {
+    $(a).textContent = when;
+    $(b).style.background = colour;
+  }
+}
+
+function showGate() {
+  $("#shell").hidden = true;
+  $("#gate").hidden = false;
 }
 
 async function poll() {
   try {
-    const r = await fetch("api" + (SELECTED ? "?run=" + encodeURIComponent(SELECTED) : ""));
+    const q = new URLSearchParams();
+    if (SELECTED) q.set("run", SELECTED);
+    if (PROJECT) q.set("project", PROJECT);
+    const r = await fetch("api" + (q.toString() ? "?" + q : ""));
+    if (r.status === 401) { showGate(); return; }
     render(await r.json());
     $("#dot").style.opacity = 1;
   } catch (e) { $("#dot").style.opacity = .25; }
 }
 
-if (DATA) { render(DATA); $(".live").style.display = "none"; }
-else { poll(); setInterval(poll, 2000); }
+const form = $("#loginform");
+if (form) form.addEventListener("submit", async e => {
+  e.preventDefault();
+  const r = await fetch("login", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({token: $("#token").value})});
+  if (r.ok) { $("#token").value = ""; $("#gateerr").hidden = true; poll(); }
+  else { $("#gateerr").hidden = false; $("#token").select(); }
+});
+
+const out = $("#logout");
+if (out) out.addEventListener("click", async () => {
+  await fetch("logout", {method: "POST"});
+  showGate();
+});
+
+if (DATA) {
+  // A snapshot: no server to poll, no session to end.
+  $("#shell").hidden = false;
+  document.querySelectorAll(".live").forEach(e => e.style.display = "none");
+  render(DATA);
+} else { poll(); setInterval(poll, 2000); }
 </script>
 """
 
@@ -433,52 +611,172 @@ def page(db: Path, data: dict | None = None) -> str:
                 .replace("__DATA__", json.dumps(data) if data else "null"))
 
 
-def _payload(conn, run: str | None) -> dict:
-    """One response with both halves.
+def _payload(conn, run: str | None, *, projects: list[str] | None = None,
+             project: str | None = None, auth: bool = False) -> dict:
+    """One response with every half.
 
     The runs list and the selected run's statistics travel together because
     they are read together, and two round trips against a file a fleet is
     writing to can disagree about how much is done.
+
+    `projects`/`project`/`auth` are here rather than only in the request
+    handler so that a STATIC snapshot carries them too — otherwise the file
+    renders with an empty sidebar, which is how this was found.
     """
     return {**leases.stats(conn, run=run),
             "runs": leases.runs(conn, limit=25),
             "selected": run,
-            "run_meta": leases.run(conn, run) if run else None}
+            "run_meta": leases.run(conn, run) if run else None,
+            "projects": projects if projects is not None else [],
+            "project": project,
+            "auth": auth,
+            "authed": True}
 
 
 class _Handler(BaseHTTPRequestHandler):
-    db: Path
+    projects: dict[str, Path]
+    token: str | None
+    sessions: set
 
-    def _send(self, body: bytes, kind: str) -> None:
-        self.send_response(200)
+    # -- plumbing ----------------------------------------------------------
+
+    def _send(self, body: bytes, kind: str, *, status: int = 200,
+              cookie: str | None = None) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
         # A dashboard that serves a cached snapshot is worse than none: it is
         # confidently wrong about a number someone is about to act on.
         self.send_header("Cache-Control", "no-store")
+        # Cheap and worth having on a page that renders names from a database.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(body)
 
+    def _json(self, obj, status: int = 200) -> None:
+        self._send(json.dumps(obj).encode(), "application/json", status=status)
+
+    def _session(self) -> str | None:
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        return SimpleCookie(raw).get("sa_session", None) and \
+            SimpleCookie(raw)["sa_session"].value
+
+    def _authed(self) -> bool:
+        if not self.token:
+            return True
+        sid = self._session()
+        return bool(sid and sid in self.sessions)
+
+    def _project(self, query: dict) -> tuple[str, Path] | tuple[None, None]:
+        names = list(self.projects)
+        want = (query.get("project") or [None])[0] or (names[0] if names else None)
+        if want not in self.projects:
+            return None, None
+        return want, self.projects[want]
+
+    # -- routes ------------------------------------------------------------
+
     def do_GET(self) -> None:  # noqa: N802 - the base class names it
-        path = self.path.split("?")[0].rstrip("/") or "/"
+        u = urllib.parse.urlparse(self.path)
+        path, q = u.path.rstrip("/") or "/", urllib.parse.parse_qs(u.query)
+
+        if path == "/":
+            # The page always renders; it asks for the token itself when the
+            # API says it needs one. Serving a separate login page would mean
+            # two templates that drift.
+            self._send(page(next(iter(self.projects.values()), Path("work.db"))
+                            ).encode(), "text/html; charset=utf-8")
+            return
+
         if path == "/api":
+            if not self._authed():
+                self._json({"auth_required": True}, status=401)
+                return
+            name, db = self._project(q)
+            if db is None:
+                self._json({"error": "no such project"}, status=404)
+                return
+            run = (q.get("run") or [None])[0]
             # A fresh connection per request. sqlite3 objects are not safe to
             # share across threads, and this is a ThreadingHTTPServer.
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            run = (q.get("run") or [None])[0]
-            conn = leases.connect(self.db)
+            conn = leases.connect(db)
             try:
-                self._send(json.dumps(_payload(conn, run)).encode(),
-                           "application/json")
+                self._json(_payload(conn, run, projects=list(self.projects),
+                                    project=name, auth=bool(self.token)))
             finally:
                 conn.close()
-        elif path == "/":
-            self._send(page(self.db).encode(), "text/html; charset=utf-8")
-        else:
-            self.send_error(404)
+            return
+
+        self.send_error(404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
+        if path == "/logout":
+            sid = self._session()
+            self.sessions.discard(sid)
+            self._send(b'{"ok":true}', "application/json",
+                       cookie="sa_session=; Path=/; Max-Age=0; HttpOnly; "
+                              "SameSite=Strict")
+            return
+
+        if path == "/login":
+            if not self.token:
+                self._json({"ok": True})
+                return
+            n = int(self.headers.get("Content-Length") or 0)
+            # Bounded read: an unbounded one lets any client make the server
+            # allocate whatever it likes.
+            body = self.rfile.read(min(n, 4096)) if n else b""
+            try:
+                given = json.loads(body or b"{}").get("token", "")
+            except json.JSONDecodeError:
+                given = ""
+            # compare_digest, so a wrong token does not leak its correct
+            # prefix through how long the comparison took.
+            if not hmac.compare_digest(str(given), self.token):
+                # Slows a brute-force attempt without being a real rate limit;
+                # the actual defence is that the token should be long.
+                time.sleep(0.5)
+                self._json({"ok": False, "error": "wrong token"}, status=401)
+                return
+            sid = secrets.token_urlsafe(32)
+            self.sessions.add(sid)
+            self._send(b'{"ok":true}', "application/json",
+                       cookie=f"sa_session={sid}; Path=/; HttpOnly; "
+                              "SameSite=Strict; Max-Age=86400")
+            return
+
+        self.send_error(404)
 
     def log_message(self, *_a) -> None:
         """Silent. A poll every two seconds would bury anything worth reading."""
+
+
+def _projects(db: Path | list[Path]) -> dict[str, Path]:
+    """Name -> database. A project IS a database; there is nothing else to it.
+
+    Inventing a project table inside one of the databases would make one file
+    the registry for the others, and then moving or deleting that file breaks
+    the rest. The filename is already the name people use.
+    """
+    paths = [db] if isinstance(db, Path | str) else list(db)
+    out: dict[str, Path] = {}
+    for raw in paths:
+        q = Path(raw)
+        found = sorted(q.glob("*.db")) if q.is_dir() else [q]
+        for f in found:
+            name = f.stem
+            # Two projects with the same stem in different directories would
+            # otherwise silently shadow each other.
+            if name in out and out[name] != f:
+                name = str(f)
+            out[name] = f
+    return out
 
 
 def snapshot(db: Path, run: str | None = None) -> str:
@@ -489,20 +787,44 @@ def snapshot(db: Path, run: str | None = None) -> str:
     """
     conn = leases.connect(db)
     try:
-        return page(db, _payload(conn, run))
+        return page(db, _payload(conn, run, projects=[db.stem], project=db.stem))
     finally:
         conn.close()
 
 
-def serve(db: Path, *, host: str = "127.0.0.1", port: int = 8787,
-          open_browser: bool = True) -> None:
-    handler = type("Handler", (_Handler,), {"db": db})
-    # 127.0.0.1, not 0.0.0.0. This exposes queue contents and machine names and
-    # has no authentication; binding it to every interface by default would be
-    # a decision made on the user's behalf that they never asked for.
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def serve(db: Path | list[Path], *, host: str = "127.0.0.1", port: int = 8787,
+          open_browser: bool = True, token: str | None = None) -> None:
+    """Serve one or more project databases.
+
+    Refuses to bind off-loopback without a token. That refusal is the whole
+    security design: the dashboard exposes unit names, notes and machine names,
+    it has no TLS, and the easiest mistake in the world is to pass
+    `--host 0.0.0.0` once and forget. Making that combination impossible is
+    worth more than any amount of documentation saying not to.
+    """
+    projects = _projects(db)
+    if host not in LOOPBACK and not token:
+        raise SystemExit(
+            f"refusing to bind {host} without --token.\n"
+            "  This serves queue contents and machine names over plain HTTP.\n"
+            "  Either keep it on 127.0.0.1, or set a token:\n"
+            "      superagentic dashboard --host 0.0.0.0 --token \"$(openssl rand -hex 24)\"")
+    handler = type("Handler", (_Handler,), {
+        "projects": projects, "token": token, "sessions": set()})
     with ThreadingHTTPServer((host, port), handler) as httpd:
-        url = f"http://{host}:{port}"
+        shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
+        url = f"http://{shown}:{port}"
         print(f"superagentic dashboard  {url}   (ctrl-c to stop)")
+        print(f"  projects: {', '.join(projects)}")
+        if token:
+            print("  access token required")
+        if host not in LOOPBACK:
+            # Said every time, not once in a README. There is no TLS here.
+            print(f"  WARNING: bound to {host} over plain HTTP — the token and "
+                  "everything it protects travel unencrypted.")
         if open_browser:
             webbrowser.open(url)
         try:

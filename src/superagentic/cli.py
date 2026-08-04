@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -247,7 +248,12 @@ def _cmd_dashboard(a: argparse.Namespace) -> int:
         Path(a.out).write_text(dashboard.snapshot(db, run=a.run), encoding="utf-8")
         print(f"wrote {a.out}")
         return 0
-    dashboard.serve(db, host=a.host, port=a.port, open_browser=not a.no_open)
+    # Env var as well as a flag: a token on the command line lands in shell
+    # history and in `ps` output for anyone on the box.
+    token = a.token or os.environ.get("SUPERAGENTIC_TOKEN")
+    dashboard.serve([Path(x) for x in ([a.db] + (a.project or []))],
+                    host=a.host, port=a.port, open_browser=not a.no_open,
+                    token=token)
     return 0
 
 
@@ -363,7 +369,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = common(sub.add_parser("dashboard", help="a live view of the fleet"))
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--host", default="127.0.0.1",
-                   help="loopback by default; this has no authentication")
+                   help="loopback by default; off-loopback requires --token")
+    s.add_argument("--project", action="append", metavar="PATH",
+                   help="another database, or a directory of them; repeatable")
+    s.add_argument("--token", help="access token; prefer SUPERAGENTIC_TOKEN, "
+                                   "since a flag lands in shell history and ps")
     s.add_argument("--run", help="open on this run rather than everything")
     s.add_argument("--out", help="write a static snapshot instead of serving")
     s.add_argument("--no-open", action="store_true",
