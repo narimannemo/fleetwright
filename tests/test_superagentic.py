@@ -841,3 +841,27 @@ class TestDashboardAuth:
         html = dashboard.snapshot(db)
         assert 'const DATA = {' in html
         assert 'if (DATA) {' in html and '$("#shell").hidden = false;' in html
+
+
+class TestDashboardBrowser:
+    """Things only a browser console shows: 404s and runaway polling."""
+
+    def test_the_page_carries_its_own_favicon(self, tmp_path):
+        # Without this the browser asks for /favicon.ico and logs a 404 that
+        # looks like a bug in the tool.
+        from superagentic import dashboard
+        html = dashboard.snapshot(tmp_path / "p.db")
+        assert 'rel="icon"' in html and "data:image/svg+xml," in html
+
+    def test_favicon_ico_is_answered_rather_than_404(self):
+        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        assert '"/favicon.ico"' in src
+
+    def test_polling_stops_while_the_login_gate_is_up(self):
+        """A gated page that keeps polling 401s every two seconds forever —
+        a console full of errors and a request the server can only refuse."""
+        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        assert "clearInterval(TIMER)" in src
+        # And the interval must not be started unconditionally at load.
+        assert "poll(); setInterval(poll, 2000);" not in src
+        assert "startPolling();" in src

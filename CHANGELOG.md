@@ -5,6 +5,20 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.4.1] — 2026-08-04
+
+### Fixed
+
+- **The login gate polled forever.** With the gate up the page kept calling
+  `/api` every two seconds, so the browser console filled with 401s and the
+  server got a request it could only ever refuse. The interval now stops when
+  the gate appears and starts again after signing in — and it is no longer
+  started unconditionally at load, only once the first poll has succeeded.
+- **No favicon, so every browser logged a 404** for `/favicon.ico` that looked
+  like a fault in the tool. The page now carries an inline SVG icon — a
+  draining queue, three bars each shorter than the last — and the server
+  answers `/favicon.ico` with 204 for anything that asks regardless.
+
 ## [0.4.0] — 2026-08-04
 
 ### Added

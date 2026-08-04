@@ -63,6 +63,9 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
+<!-- Inline, so the browser never requests /favicon.ico and logs a 404.
+     A draining queue: three bars, each shorter than the last. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%2355618c%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%229%22%20width%3D%2218%22%20height%3D%224%22%20rx%3D%222%22%20fill%3D%22%23fff%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%2216%22%20width%3D%2212%22%20height%3D%224%22%20rx%3D%222%22%20fill%3D%22%23fff%22%20opacity%3D%22.72%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%2223%22%20width%3D%226%22%20height%3D%224%22%20rx%3D%222%22%20fill%3D%22%23fff%22%20opacity%3D%22.45%22%2F%3E%3C%2Fsvg%3E">
 <style>
 /* Neutrals are cooled a few degrees toward the accent rather than being taken
    off the shelf: this is a console for watching machines, and a dead-neutral
@@ -563,9 +566,19 @@ function render(d) {
   }
 }
 
+let TIMER = null;
+
+function startPolling() {
+  if (TIMER === null) TIMER = setInterval(poll, 2000);
+}
+
 function showGate() {
   $("#shell").hidden = true;
   $("#gate").hidden = false;
+  // Stop polling. Without this the page 401s every two seconds for as long as
+  // the login screen is open — a console full of errors, and a request the
+  // server can only ever refuse.
+  if (TIMER !== null) { clearInterval(TIMER); TIMER = null; }
 }
 
 async function poll() {
@@ -586,7 +599,12 @@ if (form) form.addEventListener("submit", async e => {
   const r = await fetch("login", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({token: $("#token").value})});
-  if (r.ok) { $("#token").value = ""; $("#gateerr").hidden = true; poll(); }
+  if (r.ok) {
+    $("#token").value = "";
+    $("#gateerr").hidden = true;
+    await poll();
+    startPolling();
+  }
   else { $("#gateerr").hidden = false; $("#token").select(); }
 });
 
@@ -601,7 +619,11 @@ if (DATA) {
   $("#shell").hidden = false;
   document.querySelectorAll(".live").forEach(e => e.style.display = "none");
   render(DATA);
-} else { poll(); setInterval(poll, 2000); }
+} else {
+  // The first poll decides: it either renders, or discovers a 401 and puts the
+  // gate up. Only then does the interval start.
+  poll().then(() => { if ($("#gate").hidden) startPolling(); });
+}
 </script>
 """
 
@@ -691,6 +713,12 @@ class _Handler(BaseHTTPRequestHandler):
             # two templates that drift.
             self._send(page(next(iter(self.projects.values()), Path("work.db"))
                             ).encode(), "text/html; charset=utf-8")
+            return
+
+        if path == "/favicon.ico":
+            # Belt and braces: the inline <link> means this is rarely reached,
+            # but a 404 in someone's console is a bug report waiting to happen.
+            self._send(b"", "image/svg+xml", status=204)
             return
 
         if path == "/api":
