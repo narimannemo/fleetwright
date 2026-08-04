@@ -48,13 +48,14 @@ from .leases import (
     start_run,
     this_worker,
     unit_id,
+    units,
     worker_prompt,
 )
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 __all__ = ["DEFAULT_LEASE", "DONE", "FAILED", "LEASED", "MAX_ATTEMPTS", "OPEN",
            "Unit", "add", "claim", "connect", "define", "fail", "failures",
            "finish", "heartbeat", "leased", "progress", "reclaim", "release",
            "results", "run", "runs", "spec", "start_run", "this_worker",
-           "unit_id", "worker_prompt"]
+           "unit_id", "units", "worker_prompt"]

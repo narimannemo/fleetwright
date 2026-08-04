@@ -114,7 +114,9 @@ PAGE = """<!doctype html>
    including ones with no token configured at all. Restore the semantics
    globally rather than remembering it at each call site. */
 [hidden] { display: none !important; }
-.shell { display:grid; grid-template-columns:248px minmax(0,1fr); min-height:100vh; }
+.shell { display:grid; grid-template-columns:196px 248px minmax(0,1fr);
+         min-height:100vh; }
+aside.second { background:var(--raise); }
 aside { background:var(--surface); border-right:1px solid var(--line);
         display:flex; flex-direction:column; gap:18px; padding:18px 0 14px;
         position:sticky; top:0; height:100vh; overflow-y:auto; }
@@ -136,9 +138,35 @@ aside { background:var(--surface); border-right:1px solid var(--line);
                  font-variant-numeric:tabular-nums; }
 .navitem .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .who { margin-top:auto; padding:12px 18px 0; border-top:1px solid var(--line);
-       display:flex; align-items:center; gap:10px; }
+       display:flex; flex-direction:column; align-items:stretch; gap:8px; }
+.session { font-size:11.5px; color:var(--ink3); line-height:1.35; }
+.signout { font:inherit; font-size:12px; font-weight:600; padding:6px 10px;
+           border:1px solid var(--line2); border-radius:6px; background:none;
+           color:var(--ink2); cursor:pointer; }
+.signout:hover:not(:disabled) { background:var(--ground); color:var(--ink);
+                                border-color:var(--ink3); }
+.signout:disabled { opacity:.45; cursor:not-allowed; }
+.railfoot { margin-top:auto; padding:12px 18px 0; border-top:1px solid var(--line); }
+.filters { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+           margin:-4px 0 14px; }
+.filters input { font:inherit; font-size:13px; padding:6px 10px; border-radius:7px;
+                 border:1px solid var(--line2); background:var(--ground);
+                 color:var(--ink); min-width:230px; }
+.filters input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.segs { display:inline-flex; border:1px solid var(--line2); border-radius:7px;
+        overflow:hidden; }
+.segs button { font:inherit; font-size:12px; padding:5px 10px; border:0;
+               background:none; color:var(--ink2); cursor:pointer; }
+.segs button + button { border-left:1px solid var(--line2); }
+.segs button.on { background:var(--accent); color:#fff; font-weight:600; }
+.pill.st { border:1px solid transparent; }
+.pill.done   { background:var(--done);   color:#fff; }
+.pill.failed { background:var(--failed); color:#fff; }
+.pill.leased { background:var(--leased); color:#fff; }
+.pill.open   { background:var(--line2);  color:var(--ink2); }
 .body { min-width:0; }
-@media (max-width:820px) {
+@media (max-width:1080px) { .shell { grid-template-columns:180px 210px minmax(0,1fr); } }
+@media (max-width:860px) {
   .shell { grid-template-columns:1fr; }
   aside { position:static; height:auto; }
   .navgroup.grow { flex:none; }
@@ -259,7 +287,7 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 </div>
 
 <div class="shell" id="shell" hidden>
-  <aside>
+  <aside class="rail">
     <div class="brand"><span class="mark"></span>superagentic</div>
 
     <div class="navgroup">
@@ -267,14 +295,27 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
       <div id="projects"></div>
     </div>
 
+    <div class="who">
+      <div class="session" id="session"></div>
+      <button class="signout" id="logout">Sign out</button>
+    </div>
+  </aside>
+
+  <aside class="second">
+    <div class="navgroup">
+      <div class="navlabel">Views</div>
+      <button class="navitem" id="nav-overview"><span class="lbl">Overview</span></button>
+      <button class="navitem" id="nav-jobs"><span class="lbl">Jobs</span>
+        <span class="meta" id="jobcount"></span></button>
+    </div>
+
     <div class="navgroup grow">
       <div class="navlabel">Runs <span id="runcount" class="muted"></span></div>
       <div id="sideruns"></div>
     </div>
 
-    <div class="who">
+    <div class="railfoot">
       <span class="live"><span class="dot" id="dot"></span><span id="ago">—</span></span>
-      <button class="link" id="logout" hidden>Sign out</button>
     </div>
   </aside>
 
@@ -284,7 +325,18 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
   <span class="sub mono" id="db"></span>
   <span class="live"><span class="dot" id="dot2"></span><span id="ago2">—</span></span>
 </header>
-<main>
+<main id="view-jobs" hidden>
+  <div class="card wide">
+    <h2>Jobs</h2>
+    <div class="filters">
+      <input id="jobq" type="search" placeholder="filter by name, worker or note">
+      <span class="segs" id="jobstatus"></span>
+      <span class="muted" id="jobmeta"></span>
+    </div>
+    <div class="scroll" id="jobs"></div>
+  </div>
+</main>
+<main id="view-overview">
   <div id="scope"></div>
   <div class="tiles" id="tiles"></div>
   <div class="card wide">
@@ -338,18 +390,81 @@ function ago(s) {
 const params = new URLSearchParams(location.search);
 let SELECTED = params.get("run");
 let PROJECT = params.get("project");
+let VIEW = params.get("view") === "jobs" ? "jobs" : "overview";
+let JOBSTATUS = params.get("status") || "";
+let JOBQ = "";
 
 function syncUrl() {
   const u = new URL(location.href);
-  SELECTED ? u.searchParams.set("run", SELECTED) : u.searchParams.delete("run");
-  PROJECT ? u.searchParams.set("project", PROJECT) : u.searchParams.delete("project");
+  const set = (k, v) => v ? u.searchParams.set(k, v) : u.searchParams.delete(k);
+  set("run", SELECTED);
+  set("project", PROJECT);
+  set("view", VIEW === "jobs" ? "jobs" : "");
+  set("status", JOBSTATUS);
   history.replaceState(null, "", u);
+}
+
+function setView(v) {
+  VIEW = v;
+  syncUrl();
+  $("#view-jobs").hidden = v !== "jobs";
+  $("#view-overview").hidden = v === "jobs";
+  $("#nav-jobs").classList.toggle("on", v === "jobs");
+  $("#nav-overview").classList.toggle("on", v !== "jobs");
+  if (v === "jobs") loadJobs();
+}
+
+const STATUSES = ["", "leased", "open", "done", "failed"];
+
+async function loadJobs() {
+  if (DATA) { $("#jobs").innerHTML =
+    `<div class="empty">A static snapshot has no live job list.</div>`; return; }
+  const q = new URLSearchParams();
+  if (SELECTED) q.set("run", SELECTED);
+  if (PROJECT) q.set("project", PROJECT);
+  if (JOBSTATUS) q.set("status", JOBSTATUS);
+  if (JOBQ) q.set("q", JOBQ);
+  let d;
+  try { d = await (await fetch("api/units?" + q)).json(); }
+  catch (e) { return; }
+  if (d.auth_required) { showGate(); return; }
+
+  $("#jobstatus").innerHTML = STATUSES.map(st =>
+    `<button data-st="${st}" class="${st === JOBSTATUS ? "on" : ""}">${
+      st || "all"}</button>`).join("");
+  $("#jobstatus").querySelectorAll("[data-st]").forEach(b =>
+    b.addEventListener("click", () => { JOBSTATUS = b.dataset.st; syncUrl(); loadJobs(); }));
+
+  // Never let a bounded list look complete. A view that silently shows the
+  // first 300 of 40,000 is a view that lies.
+  $("#jobmeta").textContent = d.truncated
+    ? `showing ${d.shown} of ${d.total.toLocaleString()} — narrow the filter to see the rest`
+    : `${d.total.toLocaleString()} job${d.total === 1 ? "" : "s"}`;
+
+  $("#jobs").innerHTML = d.units.length ? `<table><tr>
+      <th style="width:3px"></th><th>job</th><th>kind</th><th>status</th>
+      <th>worker</th><th class="num">tries</th><th class="num">took</th>
+      <th>note / result</th></tr>
+    ${d.units.map(u => {
+      const bad = u.status === "failed";
+      return `<tr class="${bad ? "bad" : ""}"><td class="stripe"></td>
+      <td class="mono">${esc(u.name)}</td>
+      <td class="muted">${esc(u.kind)}</td>
+      <td><span class="pill st ${u.status}">${u.status}</span></td>
+      <td class="mono muted">${esc(u.worker || "—")}</td>
+      <td class="num ${u.attempts > 1 ? "" : "muted"}">${u.attempts}</td>
+      <td class="num muted">${u.seconds == null ? "—" : dur(u.seconds)}${
+        u.lease_left != null ? ` <span class="muted">/ ${dur(u.lease_left)} left</span>` : ""}</td>
+      <td class="muted">${esc(u.note || (u.result == null ? ""
+        : JSON.stringify(u.result)))}</td></tr>`;
+    }).join("")}</table>`
+    : `<div class="empty">No jobs match.</div>`;
 }
 
 function select(run) {
   SELECTED = run;
   syncUrl();
-  if (!DATA) poll();
+  if (!DATA) { poll(); if (VIEW === "jobs") loadJobs(); }
 }
 
 function selectProject(name) {
@@ -359,7 +474,7 @@ function selectProject(name) {
   // project to a run it has never heard of and show an empty page.
   SELECTED = null;
   syncUrl();
-  if (!DATA) poll();
+  if (!DATA) { poll(); if (VIEW === "jobs") loadJobs(); }
 }
 
 function renderSidebar(d) {
@@ -386,10 +501,25 @@ function renderSidebar(d) {
     b.addEventListener("click", () => select(b.dataset.r || null)));
 
   $("#db").textContent = d.project || "";
+  $("#jobcount").textContent = (d.totals.all || 0).toLocaleString();
   const sel = rs.find(r => r.run_id === SELECTED);
-  $("#pagetitle").textContent = sel ? (sel.label || sel.run_id) : "Overview";
+  $("#pagetitle").textContent = VIEW === "jobs" ? "Jobs"
+    : (sel ? (sel.label || sel.run_id) : "Overview");
+
+  // The session row is always present, and always honest. Hiding the button
+  // when no token is configured makes it look like a missing feature; showing
+  // a live one that ends nothing is worse.
   const lo = $("#logout");
-  lo.hidden = !d.auth;
+  if (d.auth) {
+    $("#session").textContent = "Signed in";
+    lo.disabled = false;
+    lo.title = "End this session";
+  } else {
+    $("#session").textContent = "No access token set — this dashboard is open "
+      + "on loopback.";
+    lo.disabled = true;
+    lo.title = "Nothing to sign out of: no token was configured at startup.";
+  }
 }
 
 function renderRuns(d) {
@@ -441,6 +571,7 @@ function render(d) {
   $("#gate").hidden = true;
   $("#shell").hidden = false;
   renderSidebar(d);
+  if (VIEW === "jobs") { $("#view-jobs").hidden = false; $("#view-overview").hidden = true; }
   renderRuns(d);
   const t = d.totals, pct = t.all ? Math.round(100 * t.done / t.all) : 0;
   $("#tiles").innerHTML = [
@@ -615,6 +746,17 @@ if (form) form.addEventListener("submit", async e => {
   else { $("#gateerr").hidden = false; $("#token").select(); }
 });
 
+$("#nav-overview").addEventListener("click", () => setView("overview"));
+$("#nav-jobs").addEventListener("click", () => setView("jobs"));
+let qtimer = null;
+$("#jobq").addEventListener("input", e => {
+  JOBQ = e.target.value.trim();
+  // Debounced: a keystroke per request would put a query on the database for
+  // every letter typed.
+  clearTimeout(qtimer);
+  qtimer = setTimeout(loadJobs, 200);
+});
+
 const out = $("#logout");
 if (out) out.addEventListener("click", async () => {
   await fetch("logout", {method: "POST"});
@@ -629,7 +771,11 @@ if (DATA) {
 } else {
   // The first poll decides: it either renders, or discovers a 401 and puts the
   // gate up. Only then does the interval start.
-  poll().then(() => { if ($("#gate").hidden) startPolling(); });
+  poll().then(() => {
+    if (!$("#gate").hidden) return;
+    setView(VIEW);
+    startPolling();
+  });
 }
 </script>
 """
@@ -726,6 +872,25 @@ class _Handler(BaseHTTPRequestHandler):
             # Belt and braces: the inline <link> means this is rarely reached,
             # but a 404 in someone's console is a bug report waiting to happen.
             self._send(b"", "image/svg+xml", status=204)
+            return
+
+        if path == "/api/units":
+            if not self._authed():
+                self._json({"auth_required": True}, status=401)
+                return
+            _, db = self._project(q)
+            if db is None:
+                self._json({"error": "no such project"}, status=404)
+                return
+            conn = leases.connect(db)
+            try:
+                one = lambda k: (q.get(k) or [None])[0]  # noqa: E731
+                self._json(leases.units(
+                    conn, run=one("run"), kind=one("kind"),
+                    status=one("status"), q=one("q"),
+                    limit=min(int(one("limit") or 300), 2000)))
+            finally:
+                conn.close()
             return
 
         if path == "/api":

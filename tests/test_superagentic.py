@@ -894,3 +894,80 @@ class TestDashboardHiddenAttribute:
         toggled = set(re.findall(r'id="(\w+)"[^>]*\shidden', page))
         assert {"gate", "shell"} <= toggled, toggled
         assert "[hidden] { display: none !important; }" in page
+
+
+class TestUnitsView:
+    """Everything else aggregates. This is the only thing that answers
+    'what happened to page 189'."""
+
+    def test_it_reports_when_it_truncated(self, conn):
+        # A view that silently shows the first 300 of 40,000 is a view that
+        # lies, so the caller is told.
+        sa.add(conn, "x", [f"u{i}" for i in range(50)])
+        d = sa.units(conn, limit=10)
+        assert d["total"] == 50 and d["shown"] == 10 and d["truncated"] is True
+        assert sa.units(conn, limit=100)["truncated"] is False
+
+    def test_unfinished_and_broken_sort_first(self, conn):
+        sa.add(conn, "x", ["poison", "b", "c"])
+        # `fail` RETRIES while attempts remain, so one call leaves the unit
+        # open. Only the third retires it — which is the behaviour, not a
+        # quirk of this test.
+        for _ in range(3):
+            u = next(u for u in sa.claim(conn, "x", worker="w2", n=3)
+                     if u.name == "poison")
+            sa.fail(conn, u.unit_id, worker="w2", note="bad")
+            for other in sa.leased(conn):
+                sa.release(conn, other["unit_id"], worker="w2")
+        sa.claim(conn, "x", worker="w")          # something in flight
+        got = [u["status"] for u in sa.units(conn)["units"]]
+        assert got[0] == "leased" and got[1] == "failed", got
+
+    def test_filters_compose(self, conn):
+        r = sa.start_run(conn)
+        sa.add(conn, "x", ["keep-1", "keep-2"], run=r)
+        sa.add(conn, "y", ["other"], run=r)
+        assert sa.units(conn, kind="x")["total"] == 2
+        assert sa.units(conn, q="keep")["total"] == 2
+        assert sa.units(conn, run=r, kind="y")["total"] == 1
+        assert sa.units(conn, run="nope")["total"] == 0
+
+    def test_a_held_unit_shows_elapsed_and_lease_remaining(self, conn):
+        sa.add(conn, "x", ["a"])
+        sa.claim(conn, "x", worker="w", lease=60)
+        u = sa.units(conn)["units"][0]
+        assert u["seconds"] is not None and u["lease_left"] > 0
+
+    def test_search_covers_the_note_so_failures_are_findable(self, conn):
+        sa.add(conn, "x", ["a"])
+        u = sa.claim(conn, "x", worker="w")[0]
+        sa.fail(conn, u.unit_id, worker="w", note="no text layer")
+        assert sa.units(conn, q="text layer")["total"] == 1
+
+
+class TestDashboardChrome:
+    def test_the_page_has_two_sidebars(self):
+        from superagentic import dashboard
+        assert 'aside class="rail"' in dashboard.PAGE
+        assert 'aside class="second"' in dashboard.PAGE
+        assert "grid-template-columns:196px 248px" in dashboard.PAGE
+
+    def test_runs_live_in_the_second_sidebar_and_jobs_beside_them(self):
+        from superagentic import dashboard
+        page = dashboard.PAGE
+        second = page[page.index('aside class="second"'):page.index('<div class="body">')]
+        assert 'id="sideruns"' in second, "runs are not in the second sidebar"
+        assert 'id="nav-jobs"' in second, "no Jobs entry in the second sidebar"
+
+    def test_sign_out_is_always_present_and_disabled_without_a_token(self):
+        # Hiding it makes it look like a missing feature; a live one that ends
+        # nothing is worse. So: present, disabled, and it says why.
+        from superagentic import dashboard
+        page = dashboard.PAGE
+        assert 'button class="signout" id="logout"' in page
+        assert "lo.disabled = true" in page and "Nothing to sign out of" in page
+
+    def test_the_jobs_endpoint_is_authenticated_like_everything_else(self):
+        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        block = src[src.index('if path == "/api/units":'):src.index('if path == "/api":')]
+        assert "self._authed()" in block and "auth_required" in block

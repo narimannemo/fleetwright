@@ -164,6 +164,22 @@ reads, and serves, so pointing it at a live run cannot disturb the run.
 Binds to **loopback only**. It exposes queue contents and machine names and has
 no authentication; `--host` will override that, deliberately explicitly.
 
+### `dashboard` layout
+
+Two sidebars and a detail pane.
+
+| | |
+|---|---|
+| **Rail** (left) | brand, **Projects**, and the session — signed-in state and **Sign out** |
+| **Second sidebar** | **Views** (Overview / Jobs) and the **Runs** list |
+| **Detail** | the selected view, scoped to the selected run |
+
+**Jobs** is the only view that shows individual units rather than counts:
+status, worker, attempts, elapsed, lease remaining, and the note or result. It
+filters by status and searches name, worker and note — so a failure is findable
+by what it said. The list is bounded and **says when it truncated**, because a
+view that silently shows the first 300 of 40,000 is a view that lies.
+
 ### `reclaim`
 
 Returns expired leases immediately. Rarely needed — `claim` does it — but

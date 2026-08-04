@@ -860,3 +860,55 @@ def run(conn: sqlite3.Connection, run_id: str) -> dict | None:
     """One run's record, without its statistics. `None` if there is no such run."""
     r = conn.execute("SELECT * FROM run WHERE run_id = ?", (run_id,)).fetchone()
     return dict(r) if r else None
+
+
+def units(conn: sqlite3.Connection, *, run: str | None = None,
+          kind: str | None = None, status: str | None = None,
+          q: str | None = None, limit: int = 300) -> dict:
+    """Individual units, for looking at rather than counting.
+
+    Everything else here aggregates: totals, percentiles, per-worker rollups.
+    None of it answers "what happened to page 189", which is the question
+    someone actually has when a result looks wrong.
+
+    Bounded by `limit` and it says so in the return, because a queue can hold
+    a hundred thousand units and a view that silently shows the first three
+    hundred of them is a view that lies.
+    """
+    where, args = [], []
+    for col, val in (("run_id", run), ("kind", kind), ("status", status)):
+        if val:
+            where.append(f"{col} = ?")
+            args.append(val)
+    if q:
+        where.append("(name LIKE ? OR worker LIKE ? OR note LIKE ?)")
+        args += [f"%{q}%"] * 3
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    total = conn.execute(f"SELECT count(*) FROM unit{clause}", args).fetchone()[0]
+    rows = conn.execute(
+        # Unfinished first, then most recently touched: the rows worth looking
+        # at are the ones still moving and the ones that just broke.
+        f"SELECT * FROM unit{clause} ORDER BY "
+        "CASE status WHEN 'leased' THEN 0 WHEN 'failed' THEN 1 "
+        "WHEN 'open' THEN 2 ELSE 3 END, updated_at DESC LIMIT ?",
+        [*args, limit]).fetchall()
+    now = time.time()
+    return {
+        "total": total,
+        "shown": len(rows),
+        "truncated": total > len(rows),
+        "units": [{
+            "unit_id": r["unit_id"], "kind": r["kind"], "name": r["name"],
+            "run_id": r["run_id"], "status": r["status"], "worker": r["worker"],
+            "attempts": r["attempts"], "note": r["note"],
+            "result": json.loads(r["result"]) if r["result"] else None,
+            "updated_at": r["updated_at"],
+            "seconds": (
+                (r["updated_at"] - r["claimed_at"])
+                if r["claimed_at"] and r["status"] in (DONE, FAILED)
+                else (now - r["claimed_at"]) if r["claimed_at"]
+                and r["status"] == LEASED else None),
+            "lease_left": (max(0.0, (r["leased_until"] or 0) - now)
+                           if r["status"] == LEASED else None),
+        } for r in rows],
+    }

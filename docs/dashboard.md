@@ -87,6 +87,17 @@ genuinely saturated.
 Click a run and every panel below scopes to it. The selection lives in the URL,
 so a scoped view can be sent to someone.
 
+### Jobs — *what happened to this one unit?*
+
+Every other panel aggregates. This is the only one that answers a question
+about a single job: its status, who holds or held it, how many attempts it has
+taken, how long it ran, how much lease is left, and the note or result it
+produced.
+
+Filter by status, or search across name, worker **and note** — so a failure is
+findable by what it said rather than by remembering which page it was. The list
+is bounded and tells you when it truncated.
+
 ### Six tiles — *where does this stand?*
 
 Left, done, in flight, failed, throughput, ETA. The ETA is computed from the

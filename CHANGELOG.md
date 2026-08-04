@@ -5,6 +5,26 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.5.0] — 2026-08-04
+
+### Added
+
+- **A Jobs view, and `units()` behind it.** Everything until now aggregated —
+  totals, percentiles, per-worker rollups — and none of it answered "what
+  happened to page 189". Jobs lists individual units with status, worker,
+  attempts, elapsed, lease remaining and the note or result, filters by status,
+  and searches name, worker **and note**, so a failure is findable by what it
+  said. The list is bounded and reports when it truncated: a view that silently
+  shows the first 300 of 40,000 is a view that lies.
+- **Two sidebars.** A narrow rail for projects and the session, a second for
+  Views and Runs. Runs moved out of the main pane, where the table was pushing
+  everything else below the fold.
+- **The session row is always present.** `Sign out` is shown whether or not a
+  token is configured — disabled when there is nothing to sign out of, with a
+  tooltip saying so. Hiding it made it look like a missing feature; showing a
+  live button that ends nothing would be worse.
+- `GET /api/units`, authenticated like everything else.
+
 ## [0.4.2] — 2026-08-04
 
 ### Fixed
