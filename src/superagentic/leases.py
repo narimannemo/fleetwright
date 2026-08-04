@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS unit (
     -- Stamped by the claimer and matched on read, so two workers racing the
     -- same UPDATE cannot read each other's rows back.
     lease_token TEXT,
+    -- When the current holder took it. Without this there is no way to know
+    -- how long a unit took, which is the number anyone watching a fleet
+    -- actually wants: it gives duration, percentiles, and an ETA.
+    claimed_at REAL,
     attempts INTEGER NOT NULL DEFAULT 0,
     priority INTEGER NOT NULL DEFAULT 0,
     note TEXT,
@@ -167,6 +171,21 @@ def this_worker() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns to a file written by an older version.
+
+    `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists,
+    so a new column is invisible to every database created before it. The
+    failure is an OperationalError deep inside a query, on someone else's
+    machine, with a file they cannot easily recreate.
+    """
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(unit)")}
+    for col, decl in (("claimed_at", "REAL"), ("result", "TEXT")):
+        if col not in have:
+            conn.execute(f"ALTER TABLE unit ADD COLUMN {col} {decl}")
+    conn.commit()
+
+
 def connect(path: str | Path = "work.db") -> sqlite3.Connection:
     """Open (and create) the lease file.
 
@@ -181,6 +200,7 @@ def connect(path: str | Path = "work.db") -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -297,13 +317,13 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
     conn.execute(
         f"""UPDATE unit
                SET status = ?, worker = ?, leased_until = ?, lease_token = ?,
-                   attempts = attempts + 1, updated_at = ?
+                   claimed_at = ?, attempts = attempts + 1, updated_at = ?
              WHERE unit_id IN (
                    SELECT unit_id FROM unit
                     WHERE status = ? {kind_clause}
                     ORDER BY priority DESC, created_at
                     LIMIT ?)""",
-        [LEASED, worker, now + lease, token, now, OPEN, *params, n])
+        [LEASED, worker, now + lease, token, now, now, OPEN, *params, n])
     conn.commit()
     rows = conn.execute(
         "SELECT * FROM unit WHERE lease_token = ? ORDER BY priority DESC, created_at",
@@ -338,8 +358,13 @@ def heartbeat(conn: sqlite3.Connection, unit_ids: list[str], *, worker: str,
 def _close(conn: sqlite3.Connection, unit_id: str, status: str, *,
            worker: str | None, note: str | None, result: Any = None) -> bool:
     now = time.time()
-    sql = ("UPDATE unit SET status=?, worker=NULL, leased_until=NULL, "
-           "lease_token=NULL, note=?, result=?, updated_at=? "
+    # `worker` is KEPT on a terminal status and cleared only when the unit goes
+    # back to open. Who finished what is the basis of every per-worker number,
+    # and nulling it on close threw that away for no benefit -- claimability is
+    # decided by `status`, never by `worker`.
+    keep = status in (DONE, FAILED)
+    sql = (f"UPDATE unit SET status=?, worker={'worker' if keep else 'NULL'}, "
+           "leased_until=NULL, lease_token=NULL, note=?, result=?, updated_at=? "
            "WHERE unit_id=? AND status=?")
     args: list = [status, note,
                   None if result is None else json.dumps(result, ensure_ascii=False),
@@ -475,3 +500,89 @@ def failures(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM unit WHERE status = ? ORDER BY updated_at", (FAILED,)
     ).fetchall()
+
+
+def stats(conn: sqlite3.Connection, *, buckets: int = 40) -> dict:
+    """Everything a dashboard needs, in one pass over the table.
+
+    One function rather than a dozen queries because a dashboard polls, and a
+    poll that takes twelve round trips against a file another process is
+    writing to will eventually read a torn picture: units counted as `leased`
+    in one query and `done` in the next, so the totals do not add up and the
+    number on screen flickers. This reads the rows once.
+
+    `throughput` is bucketed over the window the run actually spans, not over
+    a fixed hour, because a fleet that finished in ninety seconds and one that
+    ran overnight both have to be legible.
+    """
+    now = time.time()
+    reclaim(conn)
+    rows = conn.execute("SELECT * FROM unit").fetchall()
+
+    by_kind: dict[str, dict[str, int]] = {}
+    done_times: list[float] = []
+    durations: list[float] = []
+    per_worker: dict[str, dict] = {}
+    for r in rows:
+        k = by_kind.setdefault(r["kind"], {OPEN: 0, LEASED: 0, DONE: 0, FAILED: 0})
+        k[r["status"]] += 1
+        if r["status"] == DONE:
+            done_times.append(r["updated_at"] or now)
+            if r["claimed_at"]:
+                durations.append(max(0.0, (r["updated_at"] or now) - r["claimed_at"]))
+        if r["worker"] and r["status"] in (DONE, FAILED):
+            w = per_worker.setdefault(r["worker"], {"worker": r["worker"],
+                                                    "done": 0, "failed": 0,
+                                                    "seconds": 0.0})
+            w["done" if r["status"] == DONE else "failed"] += 1
+            if r["claimed_at"] and r["status"] == DONE:
+                w["seconds"] += max(0.0, (r["updated_at"] or now) - r["claimed_at"])
+
+    totals = {s: sum(k[s] for k in by_kind.values())
+              for s in (OPEN, LEASED, DONE, FAILED)}
+    left = totals[OPEN] + totals[LEASED]
+
+    # Percentiles, not a mean. One unit that hung for an hour drags a mean
+    # somewhere no unit actually was; p50 and p95 say what to expect and what
+    # the tail costs.
+    ds = sorted(durations)
+    def pct(p: float) -> float | None:
+        return ds[min(len(ds) - 1, int(p * len(ds)))] if ds else None
+
+    series: list[dict] = []
+    span = 0.0
+    if done_times:
+        lo, hi = min(done_times), max(max(done_times), now)
+        span = max(hi - lo, 1.0)
+        width = span / buckets
+        counts = [0] * buckets
+        for t in done_times:
+            counts[min(buckets - 1, int((t - lo) / width))] += 1
+        series = [{"t": lo + i * width, "n": c} for i, c in enumerate(counts)]
+
+    # Rate over the last quarter of the window, so an ETA reflects how the
+    # fleet is running now rather than including the ramp-up.
+    recent = [t for t in done_times if t >= now - max(span / 4, 30.0)]
+    per_sec = len(recent) / max(span / 4, 30.0) if recent else 0.0
+
+    return {
+        "now": now,
+        "by_kind": by_kind,
+        "totals": totals | {"all": len(rows), "left": left},
+        "workers": [
+            {"worker": r["worker"], "name": r["name"], "kind": r["kind"],
+             "seconds_left": round(max(0.0, (r["leased_until"] or 0) - now)),
+             "seconds_held": round(now - r["claimed_at"]) if r["claimed_at"] else None,
+             "attempts": r["attempts"]}
+            for r in rows if r["status"] == LEASED],
+        "throughput": series,
+        "duration": {"n": len(ds), "p50": pct(0.5), "p95": pct(0.95),
+                     "max": ds[-1] if ds else None},
+        "per_worker": sorted(per_worker.values(), key=lambda w: -w["done"]),
+        "failures": [{"name": r["name"], "kind": r["kind"], "note": r["note"],
+                      "attempts": r["attempts"]}
+                     for r in rows if r["status"] == FAILED],
+        "retried": sum(1 for r in rows if r["attempts"] > 1),
+        "units_per_min": round(per_sec * 60, 1),
+        "eta_seconds": round(left / per_sec) if per_sec and left else None,
+    }

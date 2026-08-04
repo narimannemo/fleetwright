@@ -120,6 +120,17 @@ self-report is not evidence:
 sqlite3 work.db "SELECT count(*), sum(status='done'), sum(attempts>1) FROM unit"
 ```
 
+### 5. Watch it, if the run is long
+
+```bash
+superagentic dashboard --db work.db --no-open    # then open the printed URL
+```
+
+Throughput, who is holding what, p50 vs p95, and a marked stripe on anything
+held past 3x the p95. Use it to answer *is anyone stuck* — which `status`
+cannot tell you, because a healthy fleet and a stalled one show the same
+`leased` count.
+
 ## Rules that matter
 
 **Set `--lease` to several times your slowest unit**, not the average. Too long

@@ -11,6 +11,7 @@ superagentic fail UNIT_ID      report one that could not be done
 superagentic release UNIT_ID   hand back, no attempt burned
 superagentic status            what is left, who holds what
 superagentic results [KIND]    what the fleet handed back
+superagentic dashboard         a live view of the fleet, in a browser
 superagentic reclaim           return expired leases now
 superagentic serve             the MCP server, on stdio
 superagentic demo              a fleet, a crash, a recovery
@@ -106,6 +107,24 @@ superagentic results extract --json
 
 What finished units handed back, in the order they finished. For the process
 that spawned the fleet and now has to assemble the output.
+
+### `dashboard`
+
+```bash
+superagentic dashboard --db work.db              # http://127.0.0.1:8787
+superagentic dashboard --db work.db --out fleet.html   # static snapshot
+```
+
+Six tiles (left, done, in flight, failed, throughput, ETA), units finished over
+time, progress per kind, **what every worker is holding right now and for how
+long**, a per-worker table, and everything nobody could finish with the reason.
+
+Served from `http.server` with the page's CSS and JS inline — no framework, no
+build step, nothing fetched from a CDN. Read-only: it opens the database,
+reads, and serves, so pointing it at a live run cannot disturb the run.
+
+Binds to **loopback only**. It exposes queue contents and machine names and has
+no authentication; `--host` will override that, deliberately explicitly.
 
 ### `reclaim`
 

@@ -182,6 +182,17 @@ def _cmd_demo(_a: argparse.Namespace) -> int:
     return demo_main()
 
 
+def _cmd_dashboard(a: argparse.Namespace) -> int:
+    from . import dashboard
+    db = Path(a.db)
+    if a.out:
+        Path(a.out).write_text(dashboard.snapshot(db), encoding="utf-8")
+        print(f"wrote {a.out}")
+        return 0
+    dashboard.serve(db, host=a.host, port=a.port, open_browser=not a.no_open)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="superagentic",
@@ -259,6 +270,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = common(sub.add_parser("serve", help="run the MCP server on stdio"))
     s.set_defaults(fn=_cmd_serve)
+
+    s = common(sub.add_parser("dashboard", help="a live view of the fleet"))
+    s.add_argument("--port", type=int, default=8787)
+    s.add_argument("--host", default="127.0.0.1",
+                   help="loopback by default; this has no authentication")
+    s.add_argument("--out", help="write a static snapshot instead of serving")
+    s.add_argument("--no-open", action="store_true",
+                   help="do not open a browser")
+    s.set_defaults(fn=_cmd_dashboard)
 
     s = sub.add_parser("demo", help="a four-worker fleet, in sixty seconds")
     s.set_defaults(fn=_cmd_demo)

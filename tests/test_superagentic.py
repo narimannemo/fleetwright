@@ -473,3 +473,81 @@ class TestPackaging:
         assert deps == [], f"add resource blocks to the formula for {deps}"
         # An actual resource block, not the word in the explanatory comment.
         assert "\n  resource " not in self._formula(monkeypatch, capsys)
+
+
+class TestDashboard:
+    def _stats(self, conn):
+        from superagentic import leases
+        return leases.stats(conn)
+
+    def test_a_finished_unit_records_how_long_it_took(self, conn):
+        sa.add(conn, "x", ["u1"])
+        u = sa.claim(conn, "x", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        assert self._stats(conn)["duration"]["n"] == 1
+
+    def test_who_finished_a_unit_survives_the_close(self, conn):
+        # `worker` used to be nulled on close, which threw away every
+        # per-worker number before it could be computed.
+        sa.add(conn, "x", ["u1"])
+        u = sa.claim(conn, "x", worker="alice")[0]
+        sa.finish(conn, u.unit_id, worker="alice")
+        assert self._stats(conn)["per_worker"][0]["worker"] == "alice"
+
+    def test_a_released_unit_has_no_holder(self, conn):
+        # …but a unit going back to open must NOT keep one, or the in-flight
+        # panel would show a worker on something nobody is doing.
+        sa.add(conn, "x", ["u1"])
+        u = sa.claim(conn, "x", worker="bob")[0]
+        sa.release(conn, u.unit_id, worker="bob")
+        assert conn.execute("SELECT worker FROM unit").fetchone()["worker"] is None
+
+    def test_stats_on_an_empty_database_does_not_explode(self, conn):
+        s = self._stats(conn)
+        assert s["totals"]["all"] == 0 and s["throughput"] == []
+        assert s["duration"]["p50"] is None and s["eta_seconds"] is None
+
+    def test_percentiles_report_the_tail_not_the_mean(self, conn):
+        import time as _t
+        sa.add(conn, "x", [f"u{i}" for i in range(10)])
+        for i, u in enumerate(sa.claim(conn, "x", worker="w", n=10)):
+            # One unit far slower than the rest: a mean would hide it.
+            conn.execute("UPDATE unit SET claimed_at=? WHERE unit_id=?",
+                         (_t.time() - (30 if i == 9 else 1), u.unit_id))
+            conn.commit()
+            sa.finish(conn, u.unit_id, worker="w")
+        d = self._stats(conn)["duration"]
+        assert d["p50"] < 5 and d["max"] > 25
+
+    def test_the_page_is_self_contained(self, tmp_path):
+        from superagentic import dashboard
+        db = tmp_path / "w.db"
+        sa.add(sa.connect(db), "x", ["u1"])
+        html = dashboard.snapshot(db)
+        # A CSP-restricted or offline viewer must still get the whole page.
+        assert not re.search(r'(?:src|href)="https?://', html)
+        assert "<script" in html and "</style>" in html
+        assert json.loads(
+            next(ln for ln in html.splitlines() if ln.startswith("const DATA = "))
+            [len("const DATA = "):].rsplit(";", 1)[0])["totals"]["all"] == 1
+
+    def test_both_themes_are_defined_not_inverted(self, tmp_path):
+        from superagentic import dashboard
+        html = dashboard.snapshot(tmp_path / "w.db")
+        for hook in ("prefers-color-scheme: dark", ':root[data-theme="dark"]',
+                     ':root[data-theme="light"]'):
+            assert hook in html, f"{hook} missing; the theme toggle will not win"
+
+    def test_the_dashboard_never_writes(self, tmp_path):
+        """Pointing it at a live run must not disturb the run."""
+        from superagentic import dashboard
+        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        for verb in ("sa.claim(", "leases.claim(", "leases.finish(", "leases.add(",
+                     "DELETE", "INSERT", "UPDATE"):
+            assert verb not in src, f"dashboard.py contains {verb!r}"
+        db = tmp_path / "w.db"
+        sa.add(sa.connect(db), "x", ["u1"])
+        before = db.read_bytes()
+        dashboard.snapshot(db)
+        assert sa.progress(sa.connect(db))["x"][sa.OPEN] == 1
+        assert len(db.read_bytes()) >= len(before)

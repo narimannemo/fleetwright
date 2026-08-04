@@ -198,6 +198,24 @@ somebody else has.
 
 See [MCP](docs/mcp.md).
 
+## Watching it run
+
+```bash
+superagentic dashboard --db work.db          # http://127.0.0.1:8787
+superagentic dashboard --out fleet.html      # a static snapshot
+```
+
+`14 left` is the same number whether four workers are moving through it steadily
+or three have died and one is stuck on a poison unit. The dashboard is the
+difference: throughput over time, **what every worker is holding right now and
+for how long**, duration p50 against p95, and a stripe on any unit held past
+three times the p95 — because "is anyone stuck?" is the question, and a raw
+duration column does not answer it.
+
+Served from `http.server`, CSS and JS inline, SVG drawn by hand. No framework,
+no build step, nothing fetched. Read-only, so pointing it at a live run cannot
+disturb the run, and bound to loopback because it has no authentication.
+
 ## Documentation
 
 | | |
