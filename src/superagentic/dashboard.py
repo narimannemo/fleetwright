@@ -107,6 +107,13 @@ PAGE = """<!doctype html>
   --failed-bg:#fdf2f2; --warn-bg:#fdf8ee; --warn:#8a6416;
 }
 * { box-sizing:border-box; }
+/* The `hidden` attribute works only through the UA stylesheet's
+   `[hidden] { display: none }`, so ANY author rule that sets `display` on the
+   same element silently beats it. `#gate` and `.shell` both set display:grid,
+   which made the login overlay render permanently on top of every dashboard —
+   including ones with no token configured at all. Restore the semantics
+   globally rather than remembering it at each call site. */
+[hidden] { display: none !important; }
 .shell { display:grid; grid-template-columns:248px minmax(0,1fr); min-height:100vh; }
 aside { background:var(--surface); border-right:1px solid var(--line);
         display:flex; flex-direction:column; gap:18px; padding:18px 0 14px;

@@ -865,3 +865,32 @@ class TestDashboardBrowser:
         # And the interval must not be started unconditionally at load.
         assert "poll(); setInterval(poll, 2000);" not in src
         assert "startPolling();" in src
+
+
+class TestDashboardHiddenAttribute:
+    def test_hidden_beats_author_display_rules(self):
+        """`hidden` only works via the UA stylesheet, so any author rule that
+        sets `display` on the same element wins and the element stays visible.
+
+        This shipped: `#gate { display:grid }` kept the login overlay rendered
+        on top of every dashboard, even ones with no token. Nothing that talks
+        to the server catches it, because it is purely a CSS cascade problem.
+        """
+        import re
+
+        from superagentic import dashboard
+        css = dashboard.PAGE[dashboard.PAGE.index("<style>"):
+                             dashboard.PAGE.index("</style>")]
+        assert re.search(r"\[hidden\][^{]*\{[^}]*display\s*:\s*none\s*!important",
+                         css), "no [hidden] guard; toggled elements will not hide"
+
+    def test_every_element_toggled_by_hidden_is_covered(self):
+        """Belt and braces: find the ids the page toggles and make sure the
+        guard exists, so adding a new one cannot silently regress."""
+        import re
+
+        from superagentic import dashboard
+        page = dashboard.PAGE
+        toggled = set(re.findall(r'id="(\w+)"[^>]*\shidden', page))
+        assert {"gate", "shell"} <= toggled, toggled
+        assert "[hidden] { display: none !important; }" in page

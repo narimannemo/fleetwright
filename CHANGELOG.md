@@ -5,6 +5,22 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.4.2] — 2026-08-04
+
+### Fixed
+
+- **The login overlay covered every dashboard, including ones with no token.**
+  `hidden` works only through the UA stylesheet's `[hidden] { display: none }`,
+  so `#gate { display:grid }` — an author rule on the same element — silently
+  beat it. The gate is `position:fixed; inset:0; z-index:20`, so it rendered on
+  top of everything and the page appeared to demand a token that was never
+  configured. `.shell` had the same rule and the same problem.
+  Fixed with a global `[hidden] { display: none !important; }` rather than by
+  remembering the rule at each call site.
+  Nothing that talks to the server could catch this: `/api` returned 200 and
+  `auth: false` throughout. It is purely a CSS cascade bug, and it needed a
+  browser to see.
+
 ## [0.4.1] — 2026-08-04
 
 ### Fixed
