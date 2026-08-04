@@ -5,6 +5,29 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.7.0] — 2026-08-04
+
+### Added
+
+- **The SuperAgentic wordmark**, set as type rather than embedded as an image.
+  A raster logo would weigh on every page and on every static snapshot, and the
+  snapshot is the artefact people actually mail to each other. Two-tone italic
+  with the cream keyline from the artwork, done with `paint-order: stroke fill`
+  so the outline sits behind the letterforms instead of eating into them.
+  Brand lives in its own three tokens — `--wm-ink`, `--wm-red`, `--wm-cream` —
+  so nothing can render "critical" in the logo red by accident. Collapsed, the
+  rail shows `SA` in the same two colours. Favicon matches.
+
+### Fixed
+
+- **The sidebar clock was unlabelled and read as a timer.** It rendered a bare
+  `17:35:02` beside a coloured dot; it was the time of the last poll, and
+  nothing on screen said so. It now reads `updated just now` / `updated 12s
+  ago`, ticks locally once a second between polls, and turns amber past ten
+  seconds — the poll is every two, so anything older means the server has
+  stopped answering. Frozen at a plausible clock time, a dead server looked
+  alive.
+
 ## [0.6.0] — 2026-08-04
 
 ### Added

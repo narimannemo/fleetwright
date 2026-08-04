@@ -65,7 +65,7 @@ PAGE = """<!doctype html>
 <title>__TITLE__</title>
 <!-- Inline, so the browser never requests /favicon.ico and logs a 404.
      A draining queue: three bars, each shorter than the last. -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%2355618c%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%229%22%20width%3D%2218%22%20height%3D%224%22%20rx%3D%222%22%20fill%3D%22%23fff%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%2216%22%20width%3D%2212%22%20height%3D%224%22%20rx%3D%222%22%20fill%3D%22%23fff%22%20opacity%3D%22.72%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%2223%22%20width%3D%226%22%20height%3D%224%22%20rx%3D%222%22%20fill%3D%22%23fff%22%20opacity%3D%22.45%22%2F%3E%3C%2Fsvg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%230b1a2b%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%228%22%20width%3D%2220%22%20height%3D%224.5%22%20rx%3D%222.25%22%20fill%3D%22%23fbeecd%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%2215%22%20width%3D%2213%22%20height%3D%224.5%22%20rx%3D%222.25%22%20fill%3D%22%23ef2b23%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%2222%22%20width%3D%227%22%20height%3D%224.5%22%20rx%3D%222.25%22%20fill%3D%22%23fbeecd%22%20opacity%3D%22.55%22%2F%3E%3C%2Fsvg%3E">
 <style>
 /* Neutrals are cooled a few degrees toward the accent rather than being taken
    off the shelf: this is a console for watching machines, and a dead-neutral
@@ -79,6 +79,9 @@ PAGE = """<!doctype html>
   --accent:#55618c;
   --done:#27754b; --leased:#2a5fa8; --open:#98a2b3; --failed:#b3282f;
   --failed-bg:#fdf2f2; --warn-bg:#fdf8ee; --warn:#8a6416;
+  /* Brand, not state. Kept in its own three tokens so nothing here can drift
+     into meaning "good" or "critical". */
+  --wm-ink:#0b1a2b; --wm-red:#ef2b23; --wm-cream:#fbeecd;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -88,6 +91,7 @@ PAGE = """<!doctype html>
     --accent:#8f9cd0;
     --done:#4ec97a; --leased:#6ba9ff; --open:#69748a; --failed:#ff7b72;
     --failed-bg:#2a1618; --warn-bg:#2a2318; --warn:#d7b45e;
+  --wm-ink:#0b1a2b; --wm-red:#ff3b32; --wm-cream:#f6e6c4;
   }
 }
 :root[data-theme="dark"] {
@@ -97,6 +101,7 @@ PAGE = """<!doctype html>
   --accent:#8f9cd0;
   --done:#4ec97a; --leased:#6ba9ff; --open:#69748a; --failed:#ff7b72;
   --failed-bg:#2a1618; --warn-bg:#2a2318; --warn:#d7b45e;
+  --wm-ink:#0b1a2b; --wm-red:#ff3b32; --wm-cream:#f6e6c4;
 }
 :root[data-theme="light"] {
   --ground:#f5f6f9; --surface:#fff; --raise:#fafbfd;
@@ -105,6 +110,7 @@ PAGE = """<!doctype html>
   --accent:#55618c;
   --done:#27754b; --leased:#2a5fa8; --open:#98a2b3; --failed:#b3282f;
   --failed-bg:#fdf2f2; --warn-bg:#fdf8ee; --warn:#8a6416;
+  --wm-ink:#0b1a2b; --wm-red:#ef2b23; --wm-cream:#fbeecd;
 }
 * { box-sizing:border-box; }
 /* The `hidden` attribute works only through the UA stylesheet's
@@ -120,9 +126,19 @@ aside.second { background:var(--raise); }
 aside { background:var(--surface); border-right:1px solid var(--line);
         display:flex; flex-direction:column; gap:18px; padding:18px 0 14px;
         position:sticky; top:0; height:100vh; overflow-y:auto; }
-.brand { display:flex; align-items:center; gap:9px; padding:0 18px;
-         font-weight:660; font-size:14px; letter-spacing:-.01em; }
-.brand .mark { width:3px; height:15px; border-radius:2px; background:var(--accent); }
+.brand { display:flex; align-items:center; gap:9px; padding:0 16px; }
+/* The wordmark is set as TYPE, not embedded as an image. A raster logo would
+   add weight to every page and to every static snapshot, and the snapshot is
+   the thing people mail to each other. The cream keyline is the sticker
+   outline from the artwork, done with paint-order so the stroke sits behind
+   the fill instead of eating into the letterforms. */
+.wordmark { font: italic 900 17px/1.05 "Helvetica Neue", Helvetica, Arial,
+            ui-sans-serif, system-ui, sans-serif;
+            letter-spacing:-.035em; white-space:nowrap; user-select:none;
+            -webkit-text-stroke:3.5px var(--wm-cream); paint-order:stroke fill; }
+.wordmark .wm-s { color:var(--wm-ink); }
+.wordmark .wm-a { color:var(--wm-red); }
+.wordmark.short { display:none; font-size:18px; -webkit-text-stroke-width:3px; }
 .navgroup { display:flex; flex-direction:column; gap:3px; }
 .navgroup.grow { flex:1; min-height:0; }
 .navlabel { font-size:10px; text-transform:uppercase; letter-spacing:.08em;
@@ -158,14 +174,15 @@ aside { background:var(--surface); border-right:1px solid var(--line);
    words. Hiding it entirely would leave no way back without knowing where to
    click. */
 .shell.railshut { grid-template-columns:52px 248px minmax(0,1fr); }
-.railshut .rail .brandname,
+.railshut .rail .wordmark:not(.short),
 .railshut .rail .navlabel,
 .railshut .rail .session,
 .railshut .rail .version,
 .railshut .rail .signout,
 .railshut .rail .navitem .lbl { display:none; }
 .railshut .rail { padding-left:0; padding-right:0; }
-.railshut .rail .brand { justify-content:center; padding:0 6px; }
+.railshut .rail .brand { justify-content:center; padding:0 4px; gap:4px; }
+.railshut .rail .wordmark.short { display:inline; }
 .railshut .rail .collapse { margin-left:0; transform:rotate(180deg); }
 .railshut .rail .navitem { justify-content:center; padding:8px 0; }
 .railshut .rail .navitem::before { content:attr(data-initial); font-weight:660;
@@ -236,7 +253,9 @@ h1::before { content:""; width:3px; height:15px; border-radius:2px;
              background:var(--accent); }
 .sub { color:var(--ink3); font-size:12px; }
 .live { display:inline-flex; align-items:center; gap:7px; color:var(--ink3);
-        font-size:12px; margin-left:auto; font-variant-numeric:tabular-nums; }
+        font-size:11.5px; margin-left:auto; font-variant-numeric:tabular-nums;
+        white-space:nowrap; }
+.railfoot .live { margin-left:0; }
 .dot { width:7px; height:7px; border-radius:50%; background:var(--open); }
 main { padding:18px 24px 48px; display:grid; gap:14px; max-width:1200px; }
 .tiles { display:grid; gap:12px;
@@ -322,8 +341,10 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 <div class="shell" id="shell" hidden>
   <aside class="rail" id="rail">
     <div class="brand">
-      <span class="mark"></span>
-      <span class="brandname">superagentic</span>
+      <span class="wordmark" aria-label="SuperAgentic">
+        <span class="wm-s">Super</span><span class="wm-a">Agentic</span></span>
+      <span class="wordmark short" aria-hidden="true">
+        <span class="wm-s">S</span><span class="wm-a">A</span></span>
       <button class="collapse" id="collapse" title="Collapse sidebar"
               aria-label="Collapse sidebar">&#8249;</button>
     </div>
@@ -354,7 +375,8 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
     </div>
 
     <div class="railfoot">
-      <span class="live"><span class="dot" id="dot"></span><span id="ago">—</span></span>
+      <span class="live" id="freshness" title="Time since this page last heard from the server">
+        <span class="dot" id="dot"></span><span id="ago">not yet updated</span></span>
     </div>
   </aside>
 
@@ -362,7 +384,7 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 <header>
   <h1 id="pagetitle">Overview</h1>
   <span class="sub mono" id="db"></span>
-  <span class="live"><span class="dot" id="dot2"></span><span id="ago2">—</span></span>
+  <span class="live"><span class="dot" id="dot2"></span><span id="ago2">not yet updated</span></span>
 </header>
 <main id="view-jobs" hidden>
   <div class="card wide">
@@ -770,13 +792,36 @@ function render(d) {
       <td>${esc(f.note || "no reason recorded")}</td></tr>`).join("")}</table>`
     : `<div class="empty">Nothing has been given up on.</div>`;
 
-  const when = new Date(d.now * 1000).toLocaleTimeString();
-  const colour = t.leased ? "var(--leased)" : "var(--open)";
+  // A bare clock time next to a dot reads as a timer or a countdown — it was
+  // neither, and nobody could tell what it counted. It is how stale the page
+  // is, said in those words, and it ticks locally between polls so a server
+  // that has stopped answering is visible rather than frozen at a plausible
+  // time.
+  LAST_UPDATE = Date.now();
+  LAST_LEASED = t.leased;
+  tickFreshness();
+}
+
+let LAST_UPDATE = null, LAST_LEASED = 0;
+
+function tickFreshness() {
+  const stale = LAST_UPDATE === null;
+  const secs = stale ? null : Math.round((Date.now() - LAST_UPDATE) / 1000);
+  const text = stale ? "not yet updated"
+    : secs < 5 ? "updated just now"
+    : secs < 90 ? `updated ${secs}s ago`
+    : `updated ${Math.round(secs / 60)}m ago`;
+  // Amber past ten seconds: the poll is every two, so anything older means the
+  // server is not answering.
+  const colour = stale ? "var(--open)"
+    : secs > 10 ? "var(--warn)"
+    : LAST_LEASED ? "var(--leased)" : "var(--done)";
   for (const [a, b] of [["#ago", "#dot"], ["#ago2", "#dot2"]]) {
-    $(a).textContent = when;
+    $(a).textContent = text;
     $(b).style.background = colour;
   }
 }
+setInterval(tickFreshness, 1000);
 
 let TIMER = null;
 

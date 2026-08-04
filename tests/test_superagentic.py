@@ -739,9 +739,14 @@ class TestDashboard:
         """Pointing it at a live run must not disturb the run."""
         from superagentic import dashboard
         src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        # Scan the PYTHON only. The embedded page is a string literal full of
+        # JavaScript, and a bare word search over it produces false alarms —
+        # `LAST_UPDATE` is not a SQL statement.
+        python_only = src.replace(dashboard.PAGE, "")
         for verb in ("sa.claim(", "leases.claim(", "leases.finish(", "leases.add(",
-                     "DELETE", "INSERT", "UPDATE"):
-            assert verb not in src, f"dashboard.py contains {verb!r}"
+                     "DELETE FROM", "INSERT INTO", "UPDATE unit", "UPDATE run",
+                     "conn.commit("):
+            assert verb not in python_only, f"dashboard.py contains {verb!r}"
         db = tmp_path / "w.db"
         sa.add(sa.connect(db), "x", ["u1"])
         before = db.read_bytes()
@@ -1039,3 +1044,41 @@ class TestRailAndVersion:
         assert "localStorage.setItem(RAIL_KEY" in page
         # Auto-collapse must not override a stored choice.
         assert 'localStorage.getItem(RAIL_KEY) === null' in page
+
+
+class TestBrandAndFreshness:
+    def test_the_wordmark_is_type_not_an_embedded_image(self):
+        """A raster logo would weigh on every page and every snapshot, and the
+        snapshot is the artefact people mail to each other."""
+        from superagentic import dashboard
+        page = dashboard.PAGE
+        assert 'class="wm-s">Super' in page and 'class="wm-a">Agentic' in page
+        assert "data:image/png" not in page and "data:image/jpeg" not in page
+
+    def test_brand_colours_are_their_own_tokens(self):
+        # Brand must never be reachable as state: nothing should be able to
+        # render "critical" in the logo red by accident.
+        from superagentic import dashboard
+        for t in ("--wm-ink", "--wm-red", "--wm-cream"):
+            assert t in dashboard.PAGE
+        css = dashboard.PAGE[:dashboard.PAGE.index("</style>")]
+        for state in ("--done", "--failed", "--leased"):
+            assert f"var({state})" not in css.split(".wordmark")[1].split("}")[0]
+
+    def test_the_collapsed_rail_still_shows_a_mark(self):
+        from superagentic import dashboard
+        assert ".railshut .rail .wordmark.short { display:inline; }" in dashboard.PAGE
+
+    def test_the_freshness_indicator_says_what_it_is(self):
+        """It used to render a bare clock time beside a dot, which reads as a
+        timer. Nobody could tell what it counted."""
+        from superagentic import dashboard
+        page = dashboard.PAGE
+        assert "updated just now" in page and "not yet updated" in page
+        # The old line rendered a bare clock into the sidebar with no label.
+        assert "const when = new Date(d.now * 1000).toLocaleTimeString();" not in page
+
+    def test_freshness_ticks_locally_so_a_dead_server_shows(self):
+        from superagentic import dashboard
+        assert "setInterval(tickFreshness, 1000)" in dashboard.PAGE
+        assert "secs > 10" in dashboard.PAGE

@@ -52,7 +52,7 @@ from .leases import (
     worker_prompt,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = ["DEFAULT_LEASE", "DONE", "FAILED", "LEASED", "MAX_ATTEMPTS", "OPEN",
            "Unit", "add", "claim", "connect", "define", "fail", "failures",
