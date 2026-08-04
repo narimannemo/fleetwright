@@ -291,10 +291,33 @@ class TestCLI:
         cli_main(["status", "--db", str(tmp_path / "w.db")])
         assert "superagentic add" in capsys.readouterr().out
 
-    def test_the_demo_runs(self, capsys):
+    def test_the_demo_runs_and_cleans_up_after_itself(self, capsys):
+        """The cleanup half is the Windows half.
+
+        The demo works in a TemporaryDirectory. Windows will not delete a file
+        that is still open, so an unclosed connection makes the demo do all its
+        work, print all its output, and then die on the very last line. POSIX
+        never reproduces it, which is what the Windows runner is for.
+        """
+        import tempfile
+
         from superagentic.demo import main as demo
-        assert demo() == 0
+        seen = []
+        real = tempfile.TemporaryDirectory
+
+        class Watched(real):
+            def __enter__(self):
+                seen.append(self.name)
+                return super().__enter__()
+
+        tempfile.TemporaryDirectory = Watched
+        try:
+            assert demo() == 0
+        finally:
+            tempfile.TemporaryDirectory = real
         assert "nobody got the same page" in capsys.readouterr().out
+        assert seen and not Path(seen[0]).exists(), \
+            "the demo left its temporary directory behind"
 
 
 class TestMCP:

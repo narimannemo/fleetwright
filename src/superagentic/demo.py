@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import tempfile
 import time
+from contextlib import closing
 from pathlib import Path
 
 from . import leases
@@ -20,8 +21,13 @@ def _rule(title: str) -> None:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory() as d:
-        conn = leases.connect(Path(d) / "demo.db")
+    # `closing`, and it is not cosmetic. Windows refuses to delete a file that
+    # is still open, so leaving the connection to be garbage-collected makes
+    # TemporaryDirectory's cleanup raise PermissionError -- the demo does all
+    # its work, prints all its output, and then dies on the last line. POSIX
+    # never shows this; the Windows CI runner is the only reason it was found.
+    with tempfile.TemporaryDirectory() as d, \
+            closing(leases.connect(Path(d) / "demo.db")) as conn:
 
         _rule("1. the orchestrator says what the work IS, once")
         leases.define(
