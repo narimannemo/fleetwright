@@ -99,12 +99,37 @@ CREATE TABLE IF NOT EXISTS kind (
     updated_at REAL
 );
 
+-- One execution of a fleet: the orchestrator started it, enqueued units into
+-- it, spawned workers, and eventually it is over. Without this a database is
+-- one flat pool and there is no way to ask what LAST NIGHT'S run did, only
+-- what the queue contains right now.
+--
+-- A run also SCOPES unit ids, which is the part that matters. Units are keyed
+-- on kind:name and enqueueing is idempotent, so without a scope a second run
+-- over the same corpus would find every unit already done and do nothing. With
+-- one, re-running your enumeration inside a run still adds nothing new, and a
+-- new run genuinely re-does the work. Those are both what you want and they
+-- are only compatible if the run is part of the key.
+--
+-- There is no `finished_at`: it is max(updated_at) over the run's units, which
+-- is correct even when the orchestrator died without recording anything.
+CREATE TABLE IF NOT EXISTS run (
+    run_id TEXT PRIMARY KEY,
+    label TEXT,
+    started_by TEXT,
+    note TEXT,
+    started_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS unit (
     -- kind:name, so enqueueing the same work twice is a no-op rather than a
     -- second copy. Callers re-run their enumeration all the time.
     unit_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
     name TEXT NOT NULL,
+    -- NULL for units enqueued without a run. They still work; they simply
+    -- appear as "ungrouped" rather than under a run.
+    run_id TEXT,
     status TEXT NOT NULL DEFAULT 'open',
     worker TEXT,
     -- Unix seconds. Past this the lease is void and anyone may take it.
@@ -131,8 +156,6 @@ CREATE TABLE IF NOT EXISTS unit (
     created_at REAL,
     updated_at REAL
 );
-CREATE INDEX IF NOT EXISTS unit_pick ON unit(kind, status, priority DESC, created_at);
-CREATE INDEX IF NOT EXISTS unit_lease ON unit(status, leased_until);
 """
 
 
@@ -203,6 +226,18 @@ def this_worker() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+#: Created AFTER the migration, never inside SCHEMA. An index names a column,
+#: and on a database written by an older version that column does not exist
+#: yet -- so `CREATE INDEX ... ON unit(run_id)` fails before the ALTER that
+#: would have added it. Splitting them makes the order explicit instead of
+#: depending on where in one script a statement happens to sit.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS unit_pick ON unit(kind, status, priority DESC, created_at);
+CREATE INDEX IF NOT EXISTS unit_lease ON unit(status, leased_until);
+CREATE INDEX IF NOT EXISTS unit_run ON unit(run_id, status);
+"""
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns to a file written by an older version.
 
@@ -211,7 +246,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     failure is an OperationalError deep inside a query, on someone else's
     machine, with a file they cannot easily recreate.
     """
-    for table, cols in (("unit", (("claimed_at", "REAL"), ("result", "TEXT"))),
+    for table, cols in (("unit", (("claimed_at", "REAL"), ("result", "TEXT"),
+                                  ("run_id", "TEXT"))),
                         ("kind", (("skills", "TEXT"), ("mcp", "TEXT"),
                                   ("context", "TEXT")))):
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -236,6 +272,7 @@ def connect(path: str | Path = "work.db") -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(SCHEMA)
     _migrate(conn)
+    conn.executescript(INDEXES)
     return conn
 
 
@@ -327,29 +364,43 @@ def _to_unit(r: sqlite3.Row, spec_row: sqlite3.Row | None = None) -> Unit:
                 _render(sp["context"] if sp else "", r["name"], meta))
 
 
+def unit_id(kind: str, name: str, run: str | None = None) -> str:
+    """The key a unit is stored under.
+
+    Scoped by run when there is one. Without the scope, a second run over the
+    same corpus would find every unit already done and do nothing — while
+    re-running your enumeration *within* a run must still add nothing new.
+    Both are wanted, and they are only compatible if the run is part of the key.
+    """
+    return f"{run}/{kind}:{name}" if run else f"{kind}:{name}"
+
+
 def add(conn: sqlite3.Connection, kind: str, names: list[str], *,
-        priority: int = 0, meta: dict | None = None) -> int:
+        priority: int = 0, meta: dict | None = None,
+        run: str | None = None) -> int:
     """Enqueue units of one kind. Returns how many were new.
 
-    Idempotent on `kind:name`, so re-running your enumeration after the corpus
-    grew adds the new units and leaves the finished ones finished. That is the
-    common case and it should not need a flag.
+    Idempotent on `(run, kind, name)`, so re-running your enumeration after the
+    corpus grew adds the new units and leaves the finished ones finished. That
+    is the common case and it should not need a flag.
     """
     now = time.time()
     payload = json.dumps(meta or {})
     before = conn.execute("SELECT count(*) FROM unit").fetchone()[0]
     conn.executemany(
         "INSERT OR IGNORE INTO unit "
-        "(unit_id, kind, name, status, priority, meta, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        [(f"{kind}:{n}", kind, n, OPEN, priority, payload, now, now) for n in names])
+        "(unit_id, kind, name, run_id, status, priority, meta, created_at, "
+        "updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        [(unit_id(kind, n, run), kind, n, run, OPEN, priority, payload, now, now)
+         for n in names])
     conn.commit()
     return conn.execute("SELECT count(*) FROM unit").fetchone()[0] - before
 
 
 def claim(conn: sqlite3.Connection, kind: str | None = None, *,
           worker: str | None = None, lease: float = DEFAULT_LEASE,
-          n: int = 1, max_attempts: int = MAX_ATTEMPTS) -> list[Unit]:
+          n: int = 1, max_attempts: int = MAX_ATTEMPTS,
+          run: str | None = None) -> list[Unit]:
     """Take up to `n` units, or get `[]` when there is nothing to do.
 
     The atomicity is one `UPDATE`. SQLite runs it inside an implicit
@@ -366,14 +417,18 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
     reclaim(conn, max_attempts=max_attempts)
     token = uuid.uuid4().hex
     now = time.time()
-    kind_clause, params = ("AND kind = ?", [kind]) if kind else ("", [])
+    where, params = "", []
+    if kind:
+        where, params = where + " AND kind = ?", [*params, kind]
+    if run:
+        where, params = where + " AND run_id = ?", [*params, run]
     conn.execute(
         f"""UPDATE unit
                SET status = ?, worker = ?, leased_until = ?, lease_token = ?,
                    claimed_at = ?, attempts = attempts + 1, updated_at = ?
              WHERE unit_id IN (
                    SELECT unit_id FROM unit
-                    WHERE status = ? {kind_clause}
+                    WHERE status = ? {where}
                     ORDER BY priority DESC, created_at
                     LIMIT ?)""",
         [LEASED, worker, now + lease, token, now, now, OPEN, *params, n])
@@ -512,12 +567,21 @@ def reclaim(conn: sqlite3.Connection, *, max_attempts: int = MAX_ATTEMPTS,
     return cur.rowcount
 
 
-def progress(conn: sqlite3.Connection, kind: str | None = None) -> dict:
+def progress(conn: sqlite3.Connection, kind: str | None = None, *,
+             run: str | None = None) -> dict:
     """Counts by kind and status. For a status line, and for deciding to stop."""
+    clauses, args = [], []
+    if kind:
+        clauses.append("kind = ?")
+        args.append(kind)
+    if run:
+        clauses.append("run_id = ?")
+        args.append(run)
     q = ("SELECT kind, status, count(*) AS n FROM unit "
-         + ("WHERE kind = ? " if kind else "") + "GROUP BY kind, status")
+         + ("WHERE " + " AND ".join(clauses) + " " if clauses else "")
+         + "GROUP BY kind, status")
     out: dict[str, dict[str, int]] = {}
-    for r in conn.execute(q, (kind,) if kind else ()):
+    for r in conn.execute(q, args):
         out.setdefault(r["kind"], {OPEN: 0, LEASED: 0, DONE: 0, FAILED: 0})
         out[r["kind"]][r["status"]] = r["n"]
     return out
@@ -531,7 +595,8 @@ def leased(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def results(conn: sqlite3.Connection, kind: str | None = None) -> list[dict]:
+def results(conn: sqlite3.Connection, kind: str | None = None, *,
+            run: str | None = None) -> list[dict]:
     """What the fleet produced, for the orchestrator that spawned it.
 
     Only finished units, in the order they finished. `result` is decoded; a
@@ -539,9 +604,9 @@ def results(conn: sqlite3.Connection, kind: str | None = None) -> list[dict]:
     different from having handed back nothing.
     """
     q = ("SELECT kind, name, unit_id, result, note, updated_at FROM unit "
-         "WHERE status = ?" + (" AND kind = ?" if kind else "") +
-         " ORDER BY updated_at")
-    args = (DONE, kind) if kind else (DONE,)
+         "WHERE status = ?" + (" AND kind = ?" if kind else "")
+         + (" AND run_id = ?" if run else "") + " ORDER BY updated_at")
+    args = tuple(x for x in (DONE, kind, run) if x is not None)
     return [{"kind": r["kind"], "name": r["name"], "unit_id": r["unit_id"],
              "result": json.loads(r["result"]) if r["result"] else None,
              "note": r["note"], "finished_at": r["updated_at"]}
@@ -555,7 +620,8 @@ def failures(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def stats(conn: sqlite3.Connection, *, buckets: int = 40) -> dict:
+def stats(conn: sqlite3.Connection, *, buckets: int = 40,
+          run: str | None = None) -> dict:
     """Everything a dashboard needs, in one pass over the table.
 
     One function rather than a dozen queries because a dashboard polls, and a
@@ -570,7 +636,9 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40) -> dict:
     """
     now = time.time()
     reclaim(conn)
-    rows = conn.execute("SELECT * FROM unit").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM unit" + (" WHERE run_id = ?" if run else ""),
+        (run,) if run else ()).fetchall()
 
     by_kind: dict[str, dict[str, int]] = {}
     done_times: list[float] = []
@@ -620,6 +688,7 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40) -> dict:
 
     return {
         "now": now,
+        "run": run,
         "by_kind": by_kind,
         "totals": totals | {"all": len(rows), "left": left},
         "workers": [
@@ -707,3 +776,87 @@ def worker_prompt(conn: sqlite3.Connection, kind: str | None = None, *,
                   f"--worker {worker} --lease {lease:g}",
         done_cmd=f"superagentic done <unit_id> --db {db} --worker {worker} "
                  f"--result '<the JSON the brief asked for>'")
+
+
+def start_run(conn: sqlite3.Connection, *, label: str | None = None,
+              started_by: str | None = None, note: str | None = None,
+              run_id: str | None = None) -> str:
+    """Begin a run, and get the id to enqueue into.
+
+    An orchestrator calls this once before spawning anything. Everything it
+    enqueues with that id belongs to the run, and every statistic can then be
+    asked of that run rather than of the whole file.
+
+    The default id is a timestamp so runs sort chronologically by id alone,
+    which is what you want when reading a list of them. Pass `run_id` when you
+    have a better handle -- a CI build number, a ticket.
+
+    There is deliberately no `end_run`. A run is over when its units are, and
+    that has to be derivable, because the orchestrator is exactly the process
+    most likely to have died.
+    """
+    now = time.time()
+    if run_id is None:
+        # Deterministic and sortable. Seconds are not enough: two runs started
+        # in the same second by a script would collide and silently merge.
+        run_id = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + \
+            f"-{uuid.uuid4().hex[:4]}"
+    conn.execute(
+        "INSERT OR REPLACE INTO run (run_id, label, started_by, note, started_at) "
+        "VALUES (?,?,?,?,?)",
+        (run_id, label, started_by or this_worker(), note, now))
+    conn.commit()
+    return run_id
+
+
+def runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
+    """Every run, newest first, with what it did.
+
+    One query with a join rather than a `stats()` call per run: a list of forty
+    runs would otherwise be forty passes over the unit table, and this is the
+    view a dashboard polls.
+    """
+    now = time.time()
+    rows = conn.execute("""
+        SELECT r.run_id, r.label, r.started_by, r.note, r.started_at,
+               count(u.unit_id) AS units,
+               sum(u.status = 'done')   AS done,
+               sum(u.status = 'failed') AS failed,
+               sum(u.status = 'open')   AS open,
+               sum(u.status = 'leased') AS leased,
+               sum(u.attempts > 1)      AS retried,
+               max(u.updated_at)        AS last,
+               count(DISTINCT u.kind)   AS kinds,
+               count(DISTINCT CASE WHEN u.status IN ('done','failed')
+                                   THEN u.worker END) AS workers,
+               sum(CASE WHEN u.status = 'done' AND u.claimed_at IS NOT NULL
+                        THEN u.updated_at - u.claimed_at END) AS busy
+          FROM run r LEFT JOIN unit u ON u.run_id = r.run_id
+         GROUP BY r.run_id ORDER BY r.started_at DESC LIMIT ?""", (limit,))
+    out = []
+    for r in rows:
+        left = (r["open"] or 0) + (r["leased"] or 0)
+        out.append({
+            "run_id": r["run_id"], "label": r["label"],
+            "started_by": r["started_by"], "note": r["note"],
+            "started_at": r["started_at"],
+            "units": r["units"] or 0, "done": r["done"] or 0,
+            "failed": r["failed"] or 0, "left": left,
+            "retried": r["retried"] or 0, "kinds": r["kinds"] or 0,
+            "workers": r["workers"] or 0,
+            "running": left > 0,
+            # Wall-clock from the start to the last thing that moved. While a
+            # run is live that is "so far"; once it is over it is the duration.
+            "elapsed": (r["last"] or now) - r["started_at"] if r["started_at"] else None,
+            # Worker-seconds actually spent. Against elapsed it says how much
+            # parallelism you really got, which is the number that tells you
+            # whether more workers would have helped.
+            "busy": r["busy"] or 0.0,
+        })
+    return out
+
+
+def run(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    """One run's record, without its statistics. `None` if there is no such run."""
+    r = conn.execute("SELECT * FROM run WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(r) if r else None

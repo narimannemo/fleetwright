@@ -40,6 +40,32 @@ def _tools() -> list[dict]:
         # work here first, so the workers it spawns need no prompt beyond
         # "claim work and do it".
         {
+            "name": "start_run",
+            "description": (
+                "BEGIN A RUN BEFORE ENQUEUEING ANYTHING. A run is one execution "
+                "of a fleet: it groups the units you are about to create, so "
+                "afterwards you can ask what THIS fleet did rather than what "
+                "the whole database contains. It also scopes unit ids, so "
+                "running the same corpus again actually re-does the work "
+                "instead of finding it already done. Returns a run_id to pass "
+                "to add_jobs."),
+            "inputSchema": {"type": "object", "properties": {
+                "label": {"type": "string",
+                          "description": "What this run is, in a few words."},
+                "note": {"type": "string"},
+                "started_by": {"type": "string",
+                               "description": "Who you are. Kept for the record."}}},
+        },
+        {
+            "name": "list_runs",
+            "description": (
+                "Every run, newest first, with what it did: units, done, "
+                "failed, workers, elapsed. Call it to find a previous run's "
+                "id, or to see whether one is still going."),
+            "inputSchema": {"type": "object", "properties": {
+                "limit": {"type": "integer", "default": 25}}},
+        },
+        {
             "name": "define_kind",
             "description": (
                 "Say what a kind of work IS, once, before enqueueing any of "
@@ -88,7 +114,10 @@ def _tools() -> list[dict]:
                     "kind": {"type": "string"},
                     "names": {"type": "array", "items": {"type": "string"}},
                     "priority": {"type": "integer", "default": 0},
-                    "meta": {"type": "object"}}},
+                    "meta": {"type": "object"},
+                    "run": {"type": "string", "description":
+                            "The run_id from start_run. Omit only if you "
+                            "genuinely do not want these units grouped."}}},
         },
         {
             "name": "worker_prompt",
@@ -109,7 +138,7 @@ def _tools() -> list[dict]:
                 "Collect what the fleet produced. For the agent that spawned "
                 "the workers and now has to assemble their output."),
             "inputSchema": {"type": "object", "properties": {
-                "kind": {"type": "string"}}},
+                "kind": {"type": "string"}, "run": {"type": "string"}}},
         },
         # -- the worker's half.
         {
@@ -127,6 +156,7 @@ def _tools() -> list[dict]:
                 "kind": {"type": "string",
                          "description": "translate, extract, audit… omit for any"},
                 "n": {"type": "integer", "default": 1},
+                "run": {"type": "string", "description": "take only this run's work"},
                 "lease_seconds": {"type": "number", "default": 900}}},
         },
         {
@@ -185,7 +215,7 @@ def _tools() -> list[dict]:
                 "what nobody could finish. Call this first in a new session to "
                 "find out where the work stands before claiming anything."),
             "inputSchema": {"type": "object", "properties": {
-                "kind": {"type": "string"}}},
+                "kind": {"type": "string"}, "run": {"type": "string"}}},
         },
     ]
 
@@ -200,6 +230,17 @@ class Server:
         self.worker = leases.this_worker()
 
     # -- tools -------------------------------------------------------------
+
+    def start_run(self, a: dict) -> dict:
+        rid = leases.start_run(self.conn, label=a.get("label"),
+                               started_by=a.get("started_by") or self.worker,
+                               note=a.get("note"))
+        return {"run_id": rid,
+                "next": "Pass this run_id to add_jobs. Every statistic can "
+                        "then be asked of this run alone."}
+
+    def list_runs(self, a: dict) -> dict:
+        return {"runs": leases.runs(self.conn, limit=int(a.get("limit", 25)))}
 
     def define_kind(self, a: dict) -> dict:
         leases.define(self.conn, a["kind"], a["instructions"],
@@ -222,8 +263,13 @@ class Server:
                                "a bare name and no instructions."}
         added = leases.add(self.conn, a["kind"], list(a["names"]),
                            priority=int(a.get("priority", 0)),
-                           meta=a.get("meta"))
-        return {"added": added, "already_queued": len(a["names"]) - added}
+                           meta=a.get("meta"), run=a.get("run"))
+        out = {"added": added, "already_queued": len(a["names"]) - added}
+        if not a.get("run"):
+            out["warning"] = ("No run. These units are ungrouped, so nothing "
+                              "will be able to report on this fleet as a unit "
+                              "of work. Call start_run first.")
+        return out
 
     def worker_prompt(self, a: dict) -> dict:
         kind = a.get("kind")
@@ -241,13 +287,13 @@ class Server:
                     "is empty."}
 
     def job_results(self, a: dict) -> dict:
-        rows = leases.results(self.conn, a.get("kind"))
+        rows = leases.results(self.conn, a.get("kind"), run=a.get("run"))
         return {"count": len(rows), "results": rows}
 
     def claim_job(self, a: dict) -> dict:
         got = leases.claim(self.conn, a.get("kind"), worker=self.worker,
                            lease=a.get("lease_seconds", leases.DEFAULT_LEASE),
-                           n=int(a.get("n", 1)))
+                           n=int(a.get("n", 1)), run=a.get("run"))
         if not got:
             return {"units": [], "queue_empty": True,
                     "note": "Nothing left to claim. Stop rather than inventing "
@@ -301,7 +347,7 @@ class Server:
                       "reclaimed"}
 
     def job_status(self, a: dict) -> dict:
-        prog = leases.progress(self.conn, a.get("kind"))
+        prog = leases.progress(self.conn, a.get("kind"), run=a.get("run"))
         return {
             "by_kind": prog,
             "left": sum(s[leases.OPEN] + s[leases.LEASED] for s in prog.values()),

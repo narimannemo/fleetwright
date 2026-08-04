@@ -32,6 +32,18 @@ uv tool install superagentic     # zero dependencies, ~1s
 
 ## The three steps
 
+### 0. Start a run
+
+```bash
+RUN=$(superagentic start --label "Tomus II extraction" --db work.db)
+```
+
+One execution of a fleet. Everything you enqueue with `--run "$RUN"` belongs to
+it, so afterwards you can ask what *this* fleet did rather than what the
+database contains — and **running the same corpus again actually re-does the
+work** instead of finding every unit already done, because the run scopes unit
+ids.
+
 ### 1. Define what the work IS
 
 This is the step people skip, and skipping it is what produces ten agents with
@@ -66,7 +78,7 @@ superagentic define extract --db work.db \
 
 ```bash
 printf '%s\n' file-a.py file-b.py file-c.py > units.txt
-superagentic add extract --from-file units.txt --db work.db \
+superagentic add extract --from-file units.txt --db work.db --run "$RUN" \
   --meta '{"path": "/abs/path/to/$name"}'
 ```
 
@@ -123,8 +135,9 @@ are. More workers than units just means idle agents.
 ### 4. Collect what they produced
 
 ```bash
-superagentic results extract --db work.db --json
-superagentic status --db work.db --who
+superagentic results extract --db work.db --run "$RUN" --json
+superagentic status --db work.db --run "$RUN" --who
+superagentic runs --db work.db
 ```
 
 **Verify against the database, not against what the agents said they did.** A

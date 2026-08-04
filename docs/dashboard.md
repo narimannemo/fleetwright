@@ -21,6 +21,18 @@ the page that does not.
 
 ## The panels, and the question each answers
 
+### Runs — *what has this fleet ever done?*
+
+Every run, newest first: units, done, failed, left, workers, elapsed, and
+**parallel** — worker-seconds divided by wall-clock. That last column is the
+one worth learning to read. A four-worker run showing `0.8x` had three workers
+idle most of the time; adding more would have changed nothing, and the fix is
+more units or more evenly sized ones. A six-worker run showing `5.1x` was
+genuinely saturated.
+
+Click a run and every panel below scopes to it. The selection lives in the URL,
+so a scoped view can be sent to someone.
+
 ### Six tiles — *where does this stand?*
 
 Left, done, in flight, failed, throughput, ETA. The ETA is computed from the

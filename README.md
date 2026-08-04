@@ -35,6 +35,10 @@ brew install narimannemo/tap/superagentic         # or via Homebrew
 import superagentic as sa
 conn = sa.connect("work.db")
 
+# One execution of a fleet. Everything below belongs to it, so afterwards you
+# can ask what THIS run did rather than what the database contains.
+run = sa.start_run(conn, label="Tomus II extraction")
+
 # The orchestrator, once. This is the part a prompt cannot do:
 # the ninth worker, spawned an hour from now, reads the same thing.
 sa.define(conn, "extract",
@@ -44,7 +48,7 @@ sa.define(conn, "extract",
     returns='{"claims": <int>, "notes": "<string>"}',
     tools="the `xrad` MCP server: record_claim, check_quote")
 
-sa.add(conn, "extract", pages, meta={"path": "scans/$name.png"})
+sa.add(conn, "extract", pages, run=run, meta={"path": "scans/$name.png"})
 ```
 
 A kind can also say what a worker must **have** — separate from what it must
@@ -84,7 +88,19 @@ Call finish (unit_id=extract:p0189) when done, or fail with a reason.
 Do not start any other unit.
 ```
 
-When they are finished, `sa.results(conn, "extract")` is what they produced.
+When they are finished, `sa.results(conn, "extract", run=run)` is what they
+produced, and `sa.runs(conn)` is every fleet you have ever run:
+
+```
+run                    label                            units  done  failed  workers  elapsed  parallel
+20260804-165708-410a * Tomus II extraction                 40     0       0        0      30s      —
+20260804-165705-13f3   Tomus I extraction, new prompt      70    70       0        6       4s     5.1x
+20260804-165650-24a8   Tomus I extraction                  73    70       3        4       9s     0.8x
+```
+
+**parallel** is worker-seconds divided by wall-clock — how much concurrency you
+actually got. `0.8x` on a four-worker run means three of them were idle most of
+the time and the units were too few or too uneven to fill them.
 
 ## In sixty seconds
 
@@ -220,8 +236,9 @@ superagentic dashboard --db work.db          # http://127.0.0.1:8787
 superagentic dashboard --out fleet.html      # a static snapshot
 ```
 
-`14 left` is the same number whether four workers are moving through it steadily
-or three have died and one is stuck on a poison unit. The dashboard is the
+Every run, newest first, with what it did — click one to scope every panel to
+it. `14 left` is the same number whether four workers are moving through it
+steadily or three have died and one is stuck on a poison unit. The dashboard is the
 difference: throughput over time, **what every worker is holding right now and
 for how long**, duration p50 against p95, and a stripe on any unit held past
 three times the p95 — because "is anyone stuck?" is the question, and a raw

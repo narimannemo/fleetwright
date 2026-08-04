@@ -172,6 +172,91 @@ class TestCapabilities:
         assert json.loads(sa.spec(conn, "y")["skills"]) == ["s"]
 
 
+class TestRuns:
+    """A run is one execution of a fleet. Without it a database is one flat
+    pool and there is no way to ask what last night's fleet did."""
+
+    def test_a_new_run_re_does_the_same_corpus(self, conn):
+        r1 = sa.start_run(conn, label="first")
+        sa.add(conn, "x", ["p1", "p2"], run=r1)
+        for u in sa.claim(conn, "x", worker="w", n=2, run=r1):
+            sa.finish(conn, u.unit_id, worker="w")
+        r2 = sa.start_run(conn, label="second")
+        # The whole reason the run scopes the id: re-running a corpus after a
+        # prompt change must actually re-run it.
+        assert sa.add(conn, "x", ["p1", "p2"], run=r2) == 2
+        assert len(sa.claim(conn, "x", worker="w", n=2, run=r2)) == 2
+
+    def test_re_adding_inside_one_run_is_still_a_no_op(self, conn):
+        r = sa.start_run(conn)
+        assert sa.add(conn, "x", ["p1", "p2"], run=r) == 2
+        assert sa.add(conn, "x", ["p1", "p2", "p3"], run=r) == 1
+
+    def test_claiming_can_be_confined_to_a_run(self, conn):
+        r1, r2 = sa.start_run(conn), sa.start_run(conn)
+        sa.add(conn, "x", ["a"], run=r1)
+        sa.add(conn, "x", ["b"], run=r2)
+        assert [u.name for u in sa.claim(conn, "x", worker="w", n=5, run=r2)] == ["b"]
+
+    def test_statistics_are_scoped(self, conn):
+        r1, r2 = sa.start_run(conn), sa.start_run(conn)
+        sa.add(conn, "x", ["a", "b"], run=r1)
+        sa.add(conn, "x", ["c"], run=r2)
+        for u in sa.claim(conn, "x", worker="w", n=2, run=r1):
+            sa.finish(conn, u.unit_id, worker="w")
+        from superagentic import leases
+        assert leases.stats(conn, run=r1)["totals"]["done"] == 2
+        assert leases.stats(conn, run=r2)["totals"]["done"] == 0
+        assert leases.stats(conn)["totals"]["all"] == 3
+
+    def test_a_run_is_over_when_its_units_are_not_when_told(self, conn):
+        # No end_run: the orchestrator is the process most likely to have died.
+        r = sa.start_run(conn, label="l")
+        sa.add(conn, "x", ["a"], run=r)
+        assert sa.runs(conn)[0]["running"] is True
+        u = sa.claim(conn, "x", worker="w", run=r)[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        assert sa.runs(conn)[0]["running"] is False
+
+    def test_runs_report_parallelism_not_just_duration(self, conn):
+        import time as _t
+        r = sa.start_run(conn)
+        sa.add(conn, "x", ["a", "b", "c"], run=r)
+        for u in sa.claim(conn, "x", worker="w", n=3, run=r):
+            conn.execute("UPDATE unit SET claimed_at=? WHERE unit_id=?",
+                         (_t.time() - 10, u.unit_id))
+            conn.commit()
+            sa.finish(conn, u.unit_id, worker="w")
+        row = sa.runs(conn)[0]
+        # busy is worker-seconds; elapsed is wall-clock. Their ratio says how
+        # much parallelism you actually got, which is what tells you whether
+        # more workers would have helped.
+        assert row["busy"] > 25 and row["elapsed"] < 5
+
+    def test_units_without_a_run_still_work(self, conn):
+        sa.add(conn, "x", ["a"])
+        assert sa.claim(conn, "x", worker="w")[0].name == "a"
+        assert sa.runs(conn) == []
+
+    def test_an_older_database_gains_run_support(self, tmp_path):
+        import sqlite3
+        db = tmp_path / "old.db"
+        c = sqlite3.connect(db)
+        c.executescript("""CREATE TABLE unit (unit_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL,
+            worker TEXT, leased_until REAL, lease_token TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0, priority INTEGER NOT NULL
+            DEFAULT 0, note TEXT, meta TEXT, created_at REAL, updated_at REAL);
+            INSERT INTO unit VALUES ('x:a','x','a','open',NULL,NULL,NULL,0,0,
+            NULL,'{}',0,0);""")
+        c.commit()
+        c.close()
+        conn = sa.connect(db)
+        assert sa.claim(conn, "x", worker="w")[0].name == "a"
+        r = sa.start_run(conn)
+        assert sa.add(conn, "x", ["b"], run=r) == 1
+
+
 class TestWorkerPrompt:
     def test_it_tells_the_worker_to_stop_on_an_empty_queue(self, conn):
         p = sa.worker_prompt(conn, db="w.db")
@@ -416,10 +501,10 @@ class TestMCP:
         s = self._server(tmp_path)
         listed = s.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {t["name"] for t in listed["result"]["tools"]}
-        assert names == {"define_kind", "add_jobs", "worker_prompt",
-                         "job_results", "claim_job", "finish_job",
-                         "release_job", "fail_job", "heartbeat_job",
-                         "job_status"}
+        assert names == {"start_run", "list_runs", "define_kind", "add_jobs",
+                         "worker_prompt", "job_results", "claim_job",
+                         "finish_job", "release_job", "fail_job",
+                         "heartbeat_job", "job_status"}
         for n in names:
             assert callable(getattr(s, n)), f"{n} is advertised but not implemented"
 

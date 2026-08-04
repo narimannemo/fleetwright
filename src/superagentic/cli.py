@@ -53,6 +53,37 @@ def _cmd_define(a: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_start(a: argparse.Namespace) -> int:
+    rid = leases.start_run(_conn(a), label=a.label, started_by=a.by,
+                           note=a.note, run_id=a.id)
+    # The id alone on stdout, so `RUN=$(superagentic start ...)` works.
+    print(rid)
+    print(f"run started: {a.label or rid}", file=sys.stderr)
+    return 0
+
+
+def _cmd_runs(a: argparse.Namespace) -> int:
+    rows = leases.runs(_conn(a), limit=a.limit)
+    if a.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no runs — `superagentic start --label ...` before enqueueing")
+        return 0
+    print(f"{'run':22}{'label':26}{'units':>7}{'done':>7}{'failed':>8}"
+          f"{'left':>6}{'workers':>8}{'elapsed':>9}")
+    for r in rows:
+        mark = "*" if r["running"] else " "
+        el = r["elapsed"]
+        el_s = "—" if el is None else (f"{el:.0f}s" if el < 90 else f"{el/60:.1f}m")
+        print(f"{mark}{r['run_id']:21}{(r['label'] or '')[:24]:26}"
+              f"{r['units']:>7,}{r['done']:>7,}{r['failed']:>8,}"
+              f"{r['left']:>6,}{r['workers']:>8}{el_s:>9}")
+    if any(r["running"] for r in rows):
+        print("\n* still running", file=sys.stderr)
+    return 0
+
+
 def _cmd_prompt(a: argparse.Namespace) -> int:
     conn = _conn(a)
     if a.kind and leases.spec(conn, a.kind) is None:
@@ -71,7 +102,7 @@ def _cmd_prompt(a: argparse.Namespace) -> int:
 
 
 def _cmd_results(a: argparse.Namespace) -> int:
-    rows = leases.results(_conn(a), a.kind)
+    rows = leases.results(_conn(a), a.kind, run=a.run)
     if a.json:
         print(json.dumps(rows, indent=2, ensure_ascii=False))
         return 0
@@ -111,7 +142,8 @@ def _cmd_add(a: argparse.Namespace) -> int:
 
 def _cmd_claim(a: argparse.Namespace) -> int:
     worker = a.worker or leases.this_worker()
-    got = leases.claim(_conn(a), a.kind, worker=worker, lease=a.lease, n=a.n)
+    got = leases.claim(_conn(a), a.kind, worker=worker, lease=a.lease, n=a.n,
+                       run=a.run)
     if not got:
         if not a.json:
             print("nothing to claim", file=sys.stderr)
@@ -163,7 +195,7 @@ def _cmd_release(a: argparse.Namespace) -> int:
 
 def _cmd_status(a: argparse.Namespace) -> int:
     conn = _conn(a)
-    prog = leases.progress(conn, a.kind)
+    prog = leases.progress(conn, a.kind, run=a.run)
     if not prog:
         print("no units queued — `superagentic add <kind> --from-file …`")
         return 0
@@ -212,7 +244,7 @@ def _cmd_dashboard(a: argparse.Namespace) -> int:
     from . import dashboard
     db = Path(a.db)
     if a.out:
-        Path(a.out).write_text(dashboard.snapshot(db), encoding="utf-8")
+        Path(a.out).write_text(dashboard.snapshot(db, run=a.run), encoding="utf-8")
         print(f"wrote {a.out}")
         return 0
     dashboard.serve(db, host=a.host, port=a.port, open_browser=not a.no_open)
@@ -230,6 +262,19 @@ def build_parser() -> argparse.ArgumentParser:
     def common(sp):
         sp.add_argument("--db", default="work.db")
         return sp
+
+    s = common(sub.add_parser(
+        "start", help="begin a run, and print its id"))
+    s.add_argument("--label", help="what this run is, in a few words")
+    s.add_argument("--by", help="who started it; defaults to hostname:pid")
+    s.add_argument("--note")
+    s.add_argument("--id", help="use this id instead of a generated one")
+    s.set_defaults(fn=_cmd_start)
+
+    s = common(sub.add_parser("runs", help="every run, newest first"))
+    s.add_argument("--limit", type=int, default=50)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=_cmd_runs)
 
     s = common(sub.add_parser("define", help="say what a kind of work IS"))
     s.add_argument("kind")
@@ -257,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = common(sub.add_parser("results", help="what the fleet produced"))
     s.add_argument("kind", nargs="?")
+    s.add_argument("--run", help="only this run")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=_cmd_results)
 
@@ -267,6 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--priority", type=int, default=0)
     s.add_argument("--meta", help="JSON carried with each unit; its keys are "
                                   "substituted into the instructions")
+    s.add_argument("--run", help="the run these units belong to")
     s.set_defaults(fn=_cmd_add)
 
     s = common(sub.add_parser("claim", help="take work nobody else holds"))
@@ -276,6 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="seconds; several times your slowest unit")
     s.add_argument("-n", type=int, default=1, help="take a batch")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--run", help="take work only from this run")
     s.add_argument("--brief", action="store_true",
                    help="print the full assignment, for piping into an agent")
     s.set_defaults(fn=_cmd_claim)
@@ -301,6 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = common(sub.add_parser("status", help="what is left, who holds what"))
     s.add_argument("kind", nargs="?")
+    s.add_argument("--run", help="only this run")
     s.add_argument("--who", action="store_true")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=_cmd_status)
@@ -315,6 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--host", default="127.0.0.1",
                    help="loopback by default; this has no authentication")
+    s.add_argument("--run", help="open on this run rather than everything")
     s.add_argument("--out", help="write a static snapshot instead of serving")
     s.add_argument("--no-open", action="store_true",
                    help="do not open a browser")

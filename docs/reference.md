@@ -3,6 +3,8 @@
 ## Commands
 
 ```
+superagentic start              begin a run; prints its id
+superagentic runs              every run, newest first
 superagentic define KIND       say what this kind of work IS
 superagentic add KIND NAME…    enqueue units; --from-file for a corpus
 superagentic claim [KIND]      take work; exits 1 when the queue is dry
@@ -19,6 +21,26 @@ superagentic demo              a fleet, a crash, a recovery
 ```
 
 Every command except `demo` takes `--db` (default `work.db`).
+
+### `start` / `runs`
+
+```bash
+RUN=$(superagentic start --label "Tomus II extraction" --db work.db)
+superagentic add extract --from-file pages.txt --run "$RUN" --db work.db
+superagentic runs --db work.db
+```
+
+A **run** is one execution of a fleet. It groups the units so you can ask what
+*that* fleet did rather than what the database contains, and it **scopes unit
+ids** — without which a second run over the same corpus would find everything
+already done and do nothing, while re-running an enumeration *inside* a run
+must still add nothing new. Both are wanted; they are only compatible if the
+run is part of the key.
+
+There is no `end`. A run is over when its units are, which has to be derivable
+because the orchestrator is the process most likely to have died.
+
+`--run` also filters `claim`, `status`, `results` and `dashboard`.
 
 ### `define`
 

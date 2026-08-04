@@ -26,6 +26,7 @@ finishes or deletes, so pointing it at a live run cannot disturb the run.
 from __future__ import annotations
 
 import json
+import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -150,6 +151,19 @@ td.num, th.num { text-align:right; }
 .legend { display:flex; gap:15px; flex-wrap:wrap; margin-top:12px;
           padding-top:11px; border-top:1px solid var(--line); }
 .empty { color:var(--ink3); font-size:13px; padding:12px 0; }
+tr.run { cursor:pointer; }
+tr.run:hover td { background:var(--raise); }
+tr.run.sel td { background:var(--raise); font-weight:600; }
+.mini { display:inline-flex; align-items:flex-end; gap:1px; height:16px; }
+.mini i { width:3px; background:var(--done); border-radius:1px; display:block; }
+.scopebar { display:flex; align-items:center; gap:10px; background:var(--surface);
+            border:1px solid var(--line); border-left:3px solid var(--accent);
+            border-radius:9px; padding:10px 14px; font-size:13px; }
+.scopebar b { font-weight:640; }
+button.link { background:none; border:0; color:var(--accent); cursor:pointer;
+              font:inherit; padding:0; text-decoration:underline; }
+.live-dot { width:6px; height:6px; border-radius:50%; background:var(--leased);
+            display:inline-block; }
 .bar { height:15px; border-radius:3px; overflow:hidden; display:flex;
        background:var(--line2); }
 .bar span { height:100%; }
@@ -168,6 +182,11 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
   <span class="live"><span class="dot" id="dot"></span><span id="ago">—</span></span>
 </header>
 <main>
+  <div class="card wide" id="runscard">
+    <h2>Runs</h2>
+    <div class="scroll" id="runs"></div>
+  </div>
+  <div id="scope"></div>
   <div class="tiles" id="tiles"></div>
   <div class="card wide">
     <h2>Units finished over time</h2>
@@ -203,7 +222,71 @@ function tile(k, v, sub, colour) {
     ${sub ? `<div class="sub2">${esc(sub)}</div>` : ""}</div>`;
 }
 
+function ago(s) {
+  const d = Date.now() / 1000 - s;
+  if (d < 90) return Math.round(d) + "s ago";
+  if (d < 5400) return Math.round(d / 60) + "m ago";
+  if (d < 86400) return (d / 3600).toFixed(1) + "h ago";
+  return Math.round(d / 86400) + "d ago";
+}
+
+let SELECTED = new URLSearchParams(location.search).get("run");
+
+function select(run) {
+  SELECTED = run;
+  const u = new URL(location.href);
+  run ? u.searchParams.set("run", run) : u.searchParams.delete("run");
+  history.replaceState(null, "", u);
+  if (!DATA) poll();
+}
+
+function renderRuns(d) {
+  const rs = d.runs || [];
+  if (!rs.length) {
+    $("#runs").innerHTML = `<div class="empty">No runs yet. Start one with
+      <span class="mono">superagentic start --label "…"</span> and enqueue with
+      <span class="mono">--run</span>.</div>`;
+    $("#scope").innerHTML = "";
+    return;
+  }
+  $("#runs").innerHTML = `<table><tr>
+      <th>run</th><th>label</th><th class="num">units</th><th class="num">done</th>
+      <th class="num">failed</th><th class="num">left</th>
+      <th class="num">workers</th><th class="num">elapsed</th>
+      <th class="num">parallel</th><th>started</th></tr>
+    ${rs.map(r => `<tr class="run ${r.run_id === SELECTED ? "sel" : ""}"
+        data-run="${esc(r.run_id)}">
+      <td class="mono">${r.running ? '<span class="live-dot"></span> ' : ""}${esc(r.run_id)}</td>
+      <td>${esc(r.label || "")}</td>
+      <td class="num">${r.units.toLocaleString()}</td>
+      <td class="num">${r.done.toLocaleString()}</td>
+      <td class="num" ${r.failed ? 'style="color:var(--failed)"' : ""}>${r.failed}</td>
+      <td class="num">${r.left.toLocaleString()}</td>
+      <td class="num">${r.workers}</td>
+      <td class="num muted">${dur(r.elapsed)}</td>
+      <td class="num muted" title="worker-seconds ÷ wall-clock">${
+        r.elapsed > 0 && r.busy ? (r.busy / r.elapsed).toFixed(1) + "x" : "—"}</td>
+      <td class="muted">${r.started_at ? ago(r.started_at) : ""}</td>
+    </tr>`).join("")}</table>`;
+  $("#runs").querySelectorAll("tr.run").forEach(tr =>
+    tr.addEventListener("click", () =>
+      select(tr.dataset.run === SELECTED ? null : tr.dataset.run)));
+
+  const sel = rs.find(r => r.run_id === SELECTED);
+  $("#scope").innerHTML = sel
+    ? `<div class="scopebar"><span>Showing <b>${esc(sel.label || sel.run_id)}</b>
+         <span class="muted mono">${esc(sel.run_id)}</span>
+         ${sel.started_by ? `<span class="muted">· started by ${esc(sel.started_by)}</span>` : ""}
+         </span>
+       <button class="link" id="clear" style="margin-left:auto">show everything</button></div>`
+    : (rs.length ? `<div class="scopebar"><span class="muted">Showing
+         <b>every run</b> — click one above to scope to it.</span></div>` : "");
+  const c = $("#clear");
+  if (c) c.addEventListener("click", () => select(null));
+}
+
 function render(d) {
+  renderRuns(d);
   const t = d.totals, pct = t.all ? Math.round(100 * t.done / t.all) : 0;
   $("#tiles").innerHTML = [
     tile("Left", t.left.toLocaleString(), `${t.all.toLocaleString()} total`),
@@ -333,7 +416,7 @@ function render(d) {
 
 async function poll() {
   try {
-    const r = await fetch("api");
+    const r = await fetch("api" + (SELECTED ? "?run=" + encodeURIComponent(SELECTED) : ""));
     render(await r.json());
     $("#dot").style.opacity = 1;
   } catch (e) { $("#dot").style.opacity = .25; }
@@ -348,6 +431,19 @@ else { poll(); setInterval(poll, 2000); }
 def page(db: Path, data: dict | None = None) -> str:
     return (PAGE.replace("__TITLE__", f"superagentic · {db.name}")
                 .replace("__DATA__", json.dumps(data) if data else "null"))
+
+
+def _payload(conn, run: str | None) -> dict:
+    """One response with both halves.
+
+    The runs list and the selected run's statistics travel together because
+    they are read together, and two round trips against a file a fleet is
+    writing to can disagree about how much is done.
+    """
+    return {**leases.stats(conn, run=run),
+            "runs": leases.runs(conn, limit=25),
+            "selected": run,
+            "run_meta": leases.run(conn, run) if run else None}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -368,9 +464,11 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api":
             # A fresh connection per request. sqlite3 objects are not safe to
             # share across threads, and this is a ThreadingHTTPServer.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            run = (q.get("run") or [None])[0]
             conn = leases.connect(self.db)
             try:
-                self._send(json.dumps(leases.stats(conn)).encode(),
+                self._send(json.dumps(_payload(conn, run)).encode(),
                            "application/json")
             finally:
                 conn.close()
@@ -383,7 +481,7 @@ class _Handler(BaseHTTPRequestHandler):
         """Silent. A poll every two seconds would bury anything worth reading."""
 
 
-def snapshot(db: Path) -> str:
+def snapshot(db: Path, run: str | None = None) -> str:
     """A single self-contained HTML file, with the data baked in.
 
     For attaching to a run, mailing to someone, or looking at a fleet that has
@@ -391,7 +489,7 @@ def snapshot(db: Path) -> str:
     """
     conn = leases.connect(db)
     try:
-        return page(db, leases.stats(conn))
+        return page(db, _payload(conn, run))
     finally:
         conn.close()
 

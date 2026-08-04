@@ -5,6 +5,37 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.3.0] — 2026-08-04
+
+### Added
+
+- **Runs.** `start_run()` / `runs()` and `superagentic start` / `runs`, plus
+  `start_run` and `list_runs` over MCP. A run is one execution of a fleet:
+  without it a database is one flat pool and there is no way to ask what last
+  night's fleet did, only what the queue holds right now.
+- **A run scopes unit ids**, and that is the part that matters. Enqueueing is
+  idempotent on `kind:name`, so without a scope a second run over the same
+  corpus would find everything already done and do nothing — while re-running
+  an enumeration *inside* a run must still add nothing new. Both are wanted and
+  they are only compatible if the run is part of the key.
+- **`--run` filters** `claim`, `status`, `results`, `dashboard`, and
+  `stats()` / `progress()` / `results()` in the library.
+- **A runs panel in the dashboard**, newest first, with a **parallel** column —
+  worker-seconds over wall-clock, i.e. how much concurrency you actually got. A
+  four-worker run showing `0.8x` had three workers idle; more would not have
+  helped. Click a run and every panel scopes to it; the selection is in the URL,
+  so a scoped view can be sent to someone.
+- **No `end_run`.** A run is over when its units are, which has to be derivable
+  because the orchestrator is the process most likely to have died.
+
+### Fixed
+
+- **`CREATE INDEX` ran before the migration that adds the column it names**, so
+  opening a database written by an older version raised
+  `no such column: run_id`. Indexes are now a separate script applied after the
+  ALTERs. Found by a test that builds an old schema by hand — this class of bug
+  is invisible to every test that starts from a fresh file.
+
 ## [0.2.0] — 2026-08-04
 
 ### Added
