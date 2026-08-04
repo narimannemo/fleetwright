@@ -144,7 +144,8 @@ def _cmd_add(a: argparse.Namespace) -> int:
 def _cmd_claim(a: argparse.Namespace) -> int:
     worker = a.worker or leases.this_worker()
     got = leases.claim(_conn(a), a.kind, worker=worker, lease=a.lease, n=a.n,
-                       run=a.run)
+                       run=a.run,
+                       model=a.model or os.environ.get("SUPERAGENTIC_MODEL"))
     if not got:
         if not a.json:
             print("nothing to claim", file=sys.stderr)
@@ -330,6 +331,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-n", type=int, default=1, help="take a batch")
     s.add_argument("--json", action="store_true")
     s.add_argument("--run", help="take work only from this run")
+    s.add_argument("--model", help="what you are, e.g. claude-opus-5. Recorded "
+                                   "as declared -- nothing verifies it. "
+                                   "SUPERAGENTIC_MODEL also works.")
     s.add_argument("--brief", action="store_true",
                    help="print the full assignment, for piping into an agent")
     s.set_defaults(fn=_cmd_claim)

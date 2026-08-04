@@ -132,6 +132,12 @@ CREATE TABLE IF NOT EXISTS unit (
     run_id TEXT,
     status TEXT NOT NULL DEFAULT 'open',
     worker TEXT,
+    -- What the worker says it is: "claude-opus-5", "gpt-5.4", "a bash script".
+    -- Declared, never detected -- nothing here can verify it, and pretending
+    -- otherwise would make it evidence when it is only a label. It earns its
+    -- column because it is the one thing you cannot reconstruct afterwards:
+    -- which model did these forty units, and were they faster or worse.
+    model TEXT,
     -- Unix seconds. Past this the lease is void and anyone may take it.
     leased_until REAL,
     -- Stamped by the claimer and matched on read, so two workers racing the
@@ -247,7 +253,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     machine, with a file they cannot easily recreate.
     """
     for table, cols in (("unit", (("claimed_at", "REAL"), ("result", "TEXT"),
-                                  ("run_id", "TEXT"))),
+                                  ("run_id", "TEXT"), ("model", "TEXT"))),
                         ("kind", (("skills", "TEXT"), ("mcp", "TEXT"),
                                   ("context", "TEXT")))):
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -400,7 +406,7 @@ def add(conn: sqlite3.Connection, kind: str, names: list[str], *,
 def claim(conn: sqlite3.Connection, kind: str | None = None, *,
           worker: str | None = None, lease: float = DEFAULT_LEASE,
           n: int = 1, max_attempts: int = MAX_ATTEMPTS,
-          run: str | None = None) -> list[Unit]:
+          run: str | None = None, model: str | None = None) -> list[Unit]:
     """Take up to `n` units, or get `[]` when there is nothing to do.
 
     The atomicity is one `UPDATE`. SQLite runs it inside an implicit
@@ -424,14 +430,15 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
         where, params = where + " AND run_id = ?", [*params, run]
     conn.execute(
         f"""UPDATE unit
-               SET status = ?, worker = ?, leased_until = ?, lease_token = ?,
-                   claimed_at = ?, attempts = attempts + 1, updated_at = ?
+               SET status = ?, worker = ?, model = ?, leased_until = ?,
+                   lease_token = ?, claimed_at = ?, attempts = attempts + 1,
+                   updated_at = ?
              WHERE unit_id IN (
                    SELECT unit_id FROM unit
                     WHERE status = ? {where}
                     ORDER BY priority DESC, created_at
                     LIMIT ?)""",
-        [LEASED, worker, now + lease, token, now, now, OPEN, *params, n])
+        [LEASED, worker, model, now + lease, token, now, now, OPEN, *params, n])
     conn.commit()
     rows = conn.execute(
         "SELECT * FROM unit WHERE lease_token = ? ORDER BY priority DESC, created_at",
@@ -644,6 +651,7 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
     done_times: list[float] = []
     durations: list[float] = []
     per_worker: dict[str, dict] = {}
+    per_model: dict[str, dict] = {}
     for r in rows:
         k = by_kind.setdefault(r["kind"], {OPEN: 0, LEASED: 0, DONE: 0, FAILED: 0})
         k[r["status"]] += 1
@@ -651,6 +659,12 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
             done_times.append(r["updated_at"] or now)
             if r["claimed_at"]:
                 durations.append(max(0.0, (r["updated_at"] or now) - r["claimed_at"]))
+        if r["model"] and r["status"] in (DONE, FAILED):
+            m = per_model.setdefault(r["model"], {"model": r["model"], "done": 0,
+                                                  "failed": 0, "seconds": 0.0})
+            m["done" if r["status"] == DONE else "failed"] += 1
+            if r["claimed_at"] and r["status"] == DONE:
+                m["seconds"] += max(0.0, (r["updated_at"] or now) - r["claimed_at"])
         if r["worker"] and r["status"] in (DONE, FAILED):
             w = per_worker.setdefault(r["worker"], {"worker": r["worker"],
                                                     "done": 0, "failed": 0,
@@ -692,7 +706,8 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
         "by_kind": by_kind,
         "totals": totals | {"all": len(rows), "left": left},
         "workers": [
-            {"worker": r["worker"], "name": r["name"], "kind": r["kind"],
+            {"worker": r["worker"], "model": r["model"], "name": r["name"],
+             "kind": r["kind"],
              "seconds_left": round(max(0.0, (r["leased_until"] or 0) - now)),
              "seconds_held": round(now - r["claimed_at"]) if r["claimed_at"] else None,
              "attempts": r["attempts"]}
@@ -701,6 +716,7 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
         "duration": {"n": len(ds), "p50": pct(0.5), "p95": pct(0.95),
                      "max": ds[-1] if ds else None},
         "per_worker": sorted(per_worker.values(), key=lambda w: -w["done"]),
+        "per_model": sorted(per_model.values(), key=lambda m: -m["done"]),
         "failures": [{"name": r["name"], "kind": r["kind"], "note": r["note"],
                       "attempts": r["attempts"]}
                      for r in rows if r["status"] == FAILED],
@@ -773,7 +789,8 @@ def worker_prompt(conn: sqlite3.Connection, kind: str | None = None, *,
     return Template(WORKER_PROMPT).safe_substitute(
         worker=worker, requires=req,
         claim_cmd=f"superagentic claim{k} --db {db} --brief "
-                  f"--worker {worker} --lease {lease:g}",
+                  f"--worker {worker} --model '<which model you are>' "
+                  f"--lease {lease:g}",
         done_cmd=f"superagentic done <unit_id> --db {db} --worker {worker} "
                  f"--result '<the JSON the brief asked for>'")
 
@@ -864,7 +881,7 @@ def run(conn: sqlite3.Connection, run_id: str) -> dict | None:
 
 def units(conn: sqlite3.Connection, *, run: str | None = None,
           kind: str | None = None, status: str | None = None,
-          q: str | None = None, limit: int = 300) -> dict:
+          q: str | None = None, limit: int = 100, offset: int = 0) -> dict:
     """Individual units, for looking at rather than counting.
 
     Everything else here aggregates: totals, percentiles, per-worker rollups.
@@ -881,8 +898,9 @@ def units(conn: sqlite3.Connection, *, run: str | None = None,
             where.append(f"{col} = ?")
             args.append(val)
     if q:
-        where.append("(name LIKE ? OR worker LIKE ? OR note LIKE ?)")
-        args += [f"%{q}%"] * 3
+        where.append("(name LIKE ? OR worker LIKE ? OR note LIKE ? "
+                     "OR model LIKE ?)")
+        args += [f"%{q}%"] * 4
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(f"SELECT count(*) FROM unit{clause}", args).fetchone()[0]
     rows = conn.execute(
@@ -890,16 +908,21 @@ def units(conn: sqlite3.Connection, *, run: str | None = None,
         # at are the ones still moving and the ones that just broke.
         f"SELECT * FROM unit{clause} ORDER BY "
         "CASE status WHEN 'leased' THEN 0 WHEN 'failed' THEN 1 "
-        "WHEN 'open' THEN 2 ELSE 3 END, updated_at DESC LIMIT ?",
-        [*args, limit]).fetchall()
+        "WHEN 'open' THEN 2 ELSE 3 END, updated_at DESC LIMIT ? OFFSET ?",
+        [*args, limit, offset]).fetchall()
     now = time.time()
     return {
         "total": total,
         "shown": len(rows),
+        "offset": offset,
+        "limit": limit,
+        "pages": max(1, -(-total // limit)) if limit else 1,
+        "page": offset // limit + 1 if limit else 1,
         "truncated": total > len(rows),
         "units": [{
             "unit_id": r["unit_id"], "kind": r["kind"], "name": r["name"],
             "run_id": r["run_id"], "status": r["status"], "worker": r["worker"],
+            "model": r["model"],
             "attempts": r["attempts"], "note": r["note"],
             "result": json.loads(r["result"]) if r["result"] else None,
             "updated_at": r["updated_at"],

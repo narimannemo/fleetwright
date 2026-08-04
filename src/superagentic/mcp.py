@@ -157,6 +157,11 @@ def _tools() -> list[dict]:
                          "description": "translate, extract, audit… omit for any"},
                 "n": {"type": "integer", "default": 1},
                 "run": {"type": "string", "description": "take only this run's work"},
+                "model": {"type": "string", "description":
+                          "Which model you are, e.g. claude-opus-5. Say it "
+                          "plainly; it is recorded as you declare it and is "
+                          "how anyone later compares one model's work against "
+                          "another's."},
                 "lease_seconds": {"type": "number", "default": 900}}},
         },
         {
@@ -293,7 +298,8 @@ class Server:
     def claim_job(self, a: dict) -> dict:
         got = leases.claim(self.conn, a.get("kind"), worker=self.worker,
                            lease=a.get("lease_seconds", leases.DEFAULT_LEASE),
-                           n=int(a.get("n", 1)), run=a.get("run"))
+                           n=int(a.get("n", 1)), run=a.get("run"),
+                           model=a.get("model"))
         if not got:
             return {"units": [], "queue_empty": True,
                     "note": "Nothing left to claim. Stop rather than inventing "

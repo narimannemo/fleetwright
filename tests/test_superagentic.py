@@ -971,3 +971,71 @@ class TestDashboardChrome:
         src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
         block = src[src.index('if path == "/api/units":'):src.index('if path == "/api":')]
         assert "self._authed()" in block and "auth_required" in block
+
+
+class TestPaginationAndModel:
+    def test_pages_are_reported_not_inferred(self, conn):
+        sa.add(conn, "x", [f"u{i}" for i in range(250)])
+        d = sa.units(conn, limit=100, offset=100)
+        assert (d["total"], d["page"], d["pages"], d["shown"]) == (250, 2, 3, 100)
+        assert sa.units(conn, limit=100, offset=200)["shown"] == 50
+
+    def test_an_offset_past_the_end_is_empty_not_an_error(self, conn):
+        sa.add(conn, "x", ["a"])
+        d = sa.units(conn, limit=10, offset=999)
+        assert d["units"] == [] and d["total"] == 1
+
+    def test_a_worker_declares_its_model_and_it_is_recorded(self, conn):
+        sa.add(conn, "x", ["a"])
+        u = sa.claim(conn, "x", worker="w", model="claude-opus-5")[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        assert sa.units(conn)["units"][0]["model"] == "claude-opus-5"
+
+    def test_model_is_declared_never_verified(self, conn):
+        # Nothing here can check it. Anything a worker says is stored as said,
+        # and the docs must not imply otherwise.
+        sa.add(conn, "x", ["a"])
+        sa.claim(conn, "x", worker="w", model="definitely-not-a-real-model")
+        assert sa.units(conn)["units"][0]["model"] == "definitely-not-a-real-model"
+
+    def test_work_rolls_up_per_model(self, conn):
+        from superagentic import leases
+        sa.add(conn, "x", [f"u{i}" for i in range(6)])
+        for m, n in (("opus", 4), ("sonnet", 2)):
+            for u in sa.claim(conn, "x", worker="w-" + m, n=n, model=m):
+                sa.finish(conn, u.unit_id, worker="w-" + m)
+        assert [(m["model"], m["done"]) for m in leases.stats(conn)["per_model"]] \
+            == [("opus", 4), ("sonnet", 2)]
+
+    def test_searching_covers_the_model(self, conn):
+        sa.add(conn, "x", ["a"])
+        sa.claim(conn, "x", worker="w", model="claude-opus-5")
+        assert sa.units(conn, q="opus")["total"] == 1
+
+    def test_units_without_a_model_are_none_not_a_guess(self, conn):
+        sa.add(conn, "x", ["a"])
+        sa.claim(conn, "x", worker="w")
+        assert sa.units(conn)["units"][0]["model"] is None
+
+
+class TestRailAndVersion:
+    def test_the_version_is_in_the_payload(self, tmp_path):
+        from superagentic import __version__, dashboard
+        html = dashboard.snapshot(tmp_path / "p.db")
+        assert f'"version": "{__version__}"' in html
+
+    def test_the_rail_collapses_without_disappearing(self):
+        from superagentic import dashboard
+        page = dashboard.PAGE
+        # Collapsed it must keep the toggle and the project buttons, or there
+        # is no way back without knowing where to click.
+        assert ".shell.railshut" in page
+        assert ".railshut .rail .collapse" in page
+        assert ".railshut .rail .navitem" in page
+
+    def test_an_explicit_toggle_survives_a_resize(self):
+        from superagentic import dashboard
+        page = dashboard.PAGE
+        assert "localStorage.setItem(RAIL_KEY" in page
+        # Auto-collapse must not override a stored choice.
+        assert 'localStorage.getItem(RAIL_KEY) === null' in page

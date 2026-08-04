@@ -101,7 +101,9 @@ Exits **1** with no stdout when there is nothing to take, so:
 while unit=$(superagentic claim extract --json); do … done
 ```
 
-`--worker` defaults to `hostname:pid`.
+`--worker` defaults to `hostname:pid`. `--model` records what the worker says
+it is — declared, never verified — so `stats()` can compare one model's work
+against another's. `SUPERAGENTIC_MODEL` works too.
 
 ### `done` / `fail` / `release`
 

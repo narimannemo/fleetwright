@@ -5,6 +5,27 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.6.0] — 2026-08-04
+
+### Added
+
+- **`model` on a claim.** `--model`, `SUPERAGENTIC_MODEL`, or `model` on
+  `claim_job`. Stored per unit, shown in Jobs, searchable, and rolled up in
+  `stats()["per_model"]` with counts and mean duration.
+  **Declared, never detected** — nothing here can verify it, and pretending
+  otherwise would make it evidence when it is only a label. It earns a column
+  because it is the one thing you cannot reconstruct afterwards: which model
+  did these forty units, and were they faster or worse.
+- **Pagination in Jobs**, 100 a page, page number in the URL. Changing a filter
+  returns to page 1, and a page past the end lands on the last real one rather
+  than an empty table.
+- **The rail collapses**, automatically below 1180px and manually with a
+  toggle. An explicit choice is remembered and wins at every width — auto
+  behaviour that overrides what someone just clicked is worse than none.
+  Collapsed it keeps the toggle and the project buttons, so there is always a
+  way back.
+- **The version in the sidebar**, from `__version__` via the payload.
+
 ## [0.5.0] — 2026-08-04
 
 ### Added

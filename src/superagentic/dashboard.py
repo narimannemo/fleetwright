@@ -46,7 +46,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import leases
+from . import __version__, leases
 
 # Status colours, and they are status colours: reserved, never reused as
 # "series 4", and every one of them appears beside a written label so the
@@ -147,6 +147,39 @@ aside { background:var(--surface); border-right:1px solid var(--line);
                                 border-color:var(--ink3); }
 .signout:disabled { opacity:.45; cursor:not-allowed; }
 .railfoot { margin-top:auto; padding:12px 18px 0; border-top:1px solid var(--line); }
+.version { font-size:10.5px; color:var(--ink3); font-variant-numeric:tabular-nums;
+           letter-spacing:.02em; }
+.brand { position:relative; }
+.collapse { margin-left:auto; border:0; background:none; color:var(--ink3);
+            cursor:pointer; font-size:17px; line-height:1; padding:2px 4px;
+            border-radius:5px; }
+.collapse:hover { background:var(--ground); color:var(--ink); }
+/* Collapsed: the rail keeps its identity and its controls, and loses only the
+   words. Hiding it entirely would leave no way back without knowing where to
+   click. */
+.shell.railshut { grid-template-columns:52px 248px minmax(0,1fr); }
+.railshut .rail .brandname,
+.railshut .rail .navlabel,
+.railshut .rail .session,
+.railshut .rail .version,
+.railshut .rail .signout,
+.railshut .rail .navitem .lbl { display:none; }
+.railshut .rail { padding-left:0; padding-right:0; }
+.railshut .rail .brand { justify-content:center; padding:0 6px; }
+.railshut .rail .collapse { margin-left:0; transform:rotate(180deg); }
+.railshut .rail .navitem { justify-content:center; padding:8px 0; }
+.railshut .rail .navitem::before { content:attr(data-initial); font-weight:660;
+                                   font-size:12px; }
+.railshut .rail .who { padding:12px 6px 0; align-items:center; }
+.pager { display:flex; align-items:center; gap:8px; margin-top:14px;
+         padding-top:12px; border-top:1px solid var(--line); flex-wrap:wrap; }
+.pager button { font:inherit; font-size:12px; padding:5px 10px; cursor:pointer;
+                border:1px solid var(--line2); border-radius:6px;
+                background:none; color:var(--ink2); }
+.pager button:hover:not(:disabled) { background:var(--raise); color:var(--ink); }
+.pager button:disabled { opacity:.4; cursor:not-allowed; }
+.pager .where { margin-left:auto; font-size:12px; color:var(--ink3);
+                font-variant-numeric:tabular-nums; }
 .filters { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
            margin:-4px 0 14px; }
 .filters input { font:inherit; font-size:13px; padding:6px 10px; border-radius:7px;
@@ -287,8 +320,13 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 </div>
 
 <div class="shell" id="shell" hidden>
-  <aside class="rail">
-    <div class="brand"><span class="mark"></span>superagentic</div>
+  <aside class="rail" id="rail">
+    <div class="brand">
+      <span class="mark"></span>
+      <span class="brandname">superagentic</span>
+      <button class="collapse" id="collapse" title="Collapse sidebar"
+              aria-label="Collapse sidebar">&#8249;</button>
+    </div>
 
     <div class="navgroup">
       <div class="navlabel">Projects</div>
@@ -298,6 +336,7 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
     <div class="who">
       <div class="session" id="session"></div>
       <button class="signout" id="logout">Sign out</button>
+      <div class="version" id="version"></div>
     </div>
   </aside>
 
@@ -334,6 +373,7 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
       <span class="muted" id="jobmeta"></span>
     </div>
     <div class="scroll" id="jobs"></div>
+    <div class="pager" id="pager"></div>
   </div>
 </main>
 <main id="view-overview">
@@ -393,6 +433,8 @@ let PROJECT = params.get("project");
 let VIEW = params.get("view") === "jobs" ? "jobs" : "overview";
 let JOBSTATUS = params.get("status") || "";
 let JOBQ = "";
+let PAGE_N = Math.max(1, parseInt(params.get("page") || "1", 10) || 1);
+const PER = 100;
 
 function syncUrl() {
   const u = new URL(location.href);
@@ -401,6 +443,7 @@ function syncUrl() {
   set("project", PROJECT);
   set("view", VIEW === "jobs" ? "jobs" : "");
   set("status", JOBSTATUS);
+  set("page", VIEW === "jobs" && PAGE_N > 1 ? String(PAGE_N) : "");
   history.replaceState(null, "", u);
 }
 
@@ -424,6 +467,8 @@ async function loadJobs() {
   if (PROJECT) q.set("project", PROJECT);
   if (JOBSTATUS) q.set("status", JOBSTATUS);
   if (JOBQ) q.set("q", JOBQ);
+  q.set("limit", String(PER));
+  q.set("offset", String((PAGE_N - 1) * PER));
   let d;
   try { d = await (await fetch("api/units?" + q)).json(); }
   catch (e) { return; }
@@ -433,18 +478,44 @@ async function loadJobs() {
     `<button data-st="${st}" class="${st === JOBSTATUS ? "on" : ""}">${
       st || "all"}</button>`).join("");
   $("#jobstatus").querySelectorAll("[data-st]").forEach(b =>
-    b.addEventListener("click", () => { JOBSTATUS = b.dataset.st; syncUrl(); loadJobs(); }));
+    b.addEventListener("click", () => {
+      JOBSTATUS = b.dataset.st;
+      // Back to page 1: staying on page 7 of a filter that now has two pages
+      // shows an empty table and looks broken.
+      PAGE_N = 1;
+      syncUrl();
+      loadJobs();
+    }));
 
-  // Never let a bounded list look complete. A view that silently shows the
-  // first 300 of 40,000 is a view that lies.
-  $("#jobmeta").textContent = d.truncated
-    ? `showing ${d.shown} of ${d.total.toLocaleString()} — narrow the filter to see the rest`
-    : `${d.total.toLocaleString()} job${d.total === 1 ? "" : "s"}`;
+  $("#jobmeta").textContent =
+    `${d.total.toLocaleString()} job${d.total === 1 ? "" : "s"}`;
+
+  const from = d.total ? d.offset + 1 : 0, to = d.offset + d.shown;
+  $("#pager").innerHTML = d.pages > 1 ? `
+    <button data-go="1"    ${d.page === 1 ? "disabled" : ""}>&laquo; first</button>
+    <button data-go="${d.page - 1}" ${d.page === 1 ? "disabled" : ""}>&lsaquo; prev</button>
+    <button data-go="${d.page + 1}" ${d.page >= d.pages ? "disabled" : ""}>next &rsaquo;</button>
+    <button data-go="${d.pages}"    ${d.page >= d.pages ? "disabled" : ""}>last &raquo;</button>
+    <span class="where">${from.toLocaleString()}–${to.toLocaleString()} of
+      ${d.total.toLocaleString()} · page ${d.page} of ${d.pages}</span>` : "";
+  $("#pager").querySelectorAll("[data-go]").forEach(b =>
+    b.addEventListener("click", () => {
+      PAGE_N = Math.min(Math.max(1, +b.dataset.go), d.pages);
+      syncUrl();
+      loadJobs();
+      $("#jobs").scrollIntoView({block: "nearest"});
+    }));
+
+  // A page beyond the end after a filter change: land the user somewhere real
+  // rather than on an empty table.
+  if (!d.units.length && d.total && d.page > d.pages) {
+    PAGE_N = d.pages; syncUrl(); loadJobs(); return;
+  }
 
   $("#jobs").innerHTML = d.units.length ? `<table><tr>
       <th style="width:3px"></th><th>job</th><th>kind</th><th>status</th>
-      <th>worker</th><th class="num">tries</th><th class="num">took</th>
-      <th>note / result</th></tr>
+      <th>worker</th><th>model</th><th class="num">tries</th>
+      <th class="num">took</th><th>note / result</th></tr>
     ${d.units.map(u => {
       const bad = u.status === "failed";
       return `<tr class="${bad ? "bad" : ""}"><td class="stripe"></td>
@@ -452,6 +523,7 @@ async function loadJobs() {
       <td class="muted">${esc(u.kind)}</td>
       <td><span class="pill st ${u.status}">${u.status}</span></td>
       <td class="mono muted">${esc(u.worker || "—")}</td>
+      <td class="mono muted">${esc(u.model || "—")}</td>
       <td class="num ${u.attempts > 1 ? "" : "muted"}">${u.attempts}</td>
       <td class="num muted">${u.seconds == null ? "—" : dur(u.seconds)}${
         u.lease_left != null ? ` <span class="muted">/ ${dur(u.lease_left)} left</span>` : ""}</td>
@@ -480,7 +552,8 @@ function selectProject(name) {
 function renderSidebar(d) {
   const ps = d.projects || [];
   $("#projects").innerHTML = ps.length ? ps.map(n =>
-    `<button class="navitem ${n === d.project ? "on" : ""}" data-p="${esc(n)}">
+    `<button class="navitem ${n === d.project ? "on" : ""}" data-p="${esc(n)}"
+       data-initial="${esc(n.slice(0, 2).toUpperCase())}" title="${esc(n)}">
        <span class="lbl">${esc(n)}</span></button>`).join("")
     : `<div class="navlabel">none</div>`;
   $("#projects").querySelectorAll("[data-p]").forEach(b =>
@@ -501,6 +574,7 @@ function renderSidebar(d) {
     b.addEventListener("click", () => select(b.dataset.r || null)));
 
   $("#db").textContent = d.project || "";
+  $("#version").textContent = d.version ? "v" + d.version : "";
   $("#jobcount").textContent = (d.totals.all || 0).toLocaleString();
   const sel = rs.find(r => r.run_id === SELECTED);
   $("#pagetitle").textContent = VIEW === "jobs" ? "Jobs"
@@ -746,11 +820,34 @@ if (form) form.addEventListener("submit", async e => {
   else { $("#gateerr").hidden = false; $("#token").select(); }
 });
 
+// Auto-collapse below the width where three columns stop fitting, but never
+// override a choice the user has made: an explicit toggle is remembered and
+// wins at every width.
+const RAIL_KEY = "sa_rail";
+function applyRail(shut) {
+  $("#shell").classList.toggle("railshut", shut);
+  $("#collapse").title = shut ? "Expand sidebar" : "Collapse sidebar";
+}
+function autoRail() {
+  const stored = localStorage.getItem(RAIL_KEY);
+  applyRail(stored === null ? window.innerWidth < 1180 : stored === "1");
+}
+$("#collapse").addEventListener("click", () => {
+  const shut = !$("#shell").classList.contains("railshut");
+  localStorage.setItem(RAIL_KEY, shut ? "1" : "0");
+  applyRail(shut);
+});
+addEventListener("resize", () => {
+  if (localStorage.getItem(RAIL_KEY) === null) autoRail();
+});
+autoRail();
+
 $("#nav-overview").addEventListener("click", () => setView("overview"));
 $("#nav-jobs").addEventListener("click", () => setView("jobs"));
 let qtimer = null;
 $("#jobq").addEventListener("input", e => {
   JOBQ = e.target.value.trim();
+  PAGE_N = 1;
   // Debounced: a keystroke per request would put a query on the database for
   // every letter typed.
   clearTimeout(qtimer);
@@ -805,7 +902,8 @@ def _payload(conn, run: str | None, *, projects: list[str] | None = None,
             "projects": projects if projects is not None else [],
             "project": project,
             "auth": auth,
-            "authed": True}
+            "authed": True,
+            "version": __version__}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -888,7 +986,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(leases.units(
                     conn, run=one("run"), kind=one("kind"),
                     status=one("status"), q=one("q"),
-                    limit=min(int(one("limit") or 300), 2000)))
+                    limit=min(int(one("limit") or 100), 500),
+                    offset=max(0, int(one("offset") or 0))))
             finally:
                 conn.close()
             return

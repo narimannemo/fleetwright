@@ -94,9 +94,33 @@ about a single job: its status, who holds or held it, how many attempts it has
 taken, how long it ran, how much lease is left, and the note or result it
 produced.
 
-Filter by status, or search across name, worker **and note** — so a failure is
-findable by what it said rather than by remembering which page it was. The list
-is bounded and tells you when it truncated.
+Filter by status, or search across name, worker, model **and note** — so a
+failure is findable by what it said rather than by remembering which page it
+was. Paginated at 100 a page, and the page number lives in the URL.
+
+### The model column
+
+A worker can say what it is when it claims:
+
+```bash
+superagentic claim extract --worker agent-1 --model claude-opus-5
+```
+
+or `model` on `claim_job` over MCP, or `SUPERAGENTIC_MODEL` in the environment.
+
+It is **declared, never detected.** Nothing here can verify it, and pretending
+otherwise would make it evidence when it is only a label. It earns a column
+because it is the one thing you cannot reconstruct afterwards — which model did
+these forty units, and were they faster or worse:
+
+```
+claude-opus-5      done 159  failed  0  mean 1.74s
+claude-sonnet-5    done 141  failed  0  mean 0.68s
+```
+
+That is the same corpus, interleaved between two models, which is the only
+comparison worth making — two models on two different sets of units are
+measuring the units, not the models.
 
 ### Six tiles — *where does this stand?*
 
