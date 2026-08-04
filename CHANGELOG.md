@@ -5,6 +5,22 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.9.1] — 2026-08-04
+
+### Fixed
+
+- **0.9.0 never published.** The change that keeps `ee/` out of the sdist broke
+  the test that verifies `ee/` is kept out — it read `ee/LICENSE`, which is now
+  correctly absent from the tarball, and the suite runs inside the unpacked
+  sdist in CI. The test now treats that absence as the property under test
+  rather than a failure, and still checks the file wherever it does exist.
+- **0.6.0 never published either** — Windows `pytest` failed on that tag. The
+  content is superseded by 0.7.0, which passed Windows, so PyPI simply skips
+  0.6.0 rather than being re-cut for it.
+
+Both were tagged and reported as shipped without the release run being
+checked. The releases now on PyPI are 0.1.0–0.5.0, 0.7.0, 0.8.0 and 0.9.1.
+
 ## [0.9.0] — 2026-08-04
 
 ### Changed

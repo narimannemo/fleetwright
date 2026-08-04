@@ -1202,12 +1202,21 @@ class TestLicenceBoundary:
 
     def test_the_boundary_is_written_down_in_both_directions(self):
         lic = (ROOT / "LICENSING.md").read_text(encoding="utf-8")
-        ee = (ROOT / "ee" / "LICENSE").read_text(encoding="utf-8")
         # It must say what you CAN do, not only what you cannot.
         assert "Apache-2.0" in lic and "ee/" in lic
-        assert "Nothing here restricts the rest of the repository" in ee
         # And it must promise the core is not clawed back later.
         assert "never move" in lic.lower() or "stays there" in lic.lower()
+
+        # `ee/` is absent from the sdist BY DESIGN, and this suite runs inside
+        # the unpacked sdist in CI. Its absence there is the property under
+        # test, not a reason to fail — so check the file only where it exists.
+        ee_license = ROOT / "ee" / "LICENSE"
+        if not ee_license.exists():
+            assert not (ROOT / "ee").exists(), \
+                "ee/ is present but has no LICENSE — the boundary is unstated"
+            return
+        ee = ee_license.read_text(encoding="utf-8")
+        assert "Nothing here restricts the rest of the repository" in ee
 
     def test_there_is_no_cla_only_a_dco(self):
         c = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
