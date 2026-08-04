@@ -501,7 +501,8 @@ class TestMCP:
         s = self._server(tmp_path)
         listed = s.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {t["name"] for t in listed["result"]["tools"]}
-        assert names == {"start_run", "list_runs", "define_kind", "add_jobs",
+        assert names == {"start_run", "list_runs", "register_skill",
+                         "list_skills", "define_kind", "add_jobs",
                          "worker_prompt", "job_results", "claim_job",
                          "finish_job", "release_job", "fail_job",
                          "heartbeat_job", "job_status"}
@@ -1082,3 +1083,76 @@ class TestBrandAndFreshness:
         from superagentic import dashboard
         assert "setInterval(tickFreshness, 1000)" in dashboard.PAGE
         assert "secs > 10" in dashboard.PAGE
+
+
+class TestSkillRegistry:
+    def test_a_readable_source_is_hashed(self, conn, tmp_path):
+        f = tmp_path / "s.md"
+        f.write_text("quote verbatim", encoding="utf-8")
+        r = sa.register_skill(conn, "x", source=str(f), version="1.0")
+        assert len(r["digest"]) == 16
+
+    def test_a_url_source_has_no_digest_and_that_is_not_an_error(self, conn):
+        r = sa.register_skill(conn, "x", source="https://example.org/s")
+        assert r["digest"] is None and r["source"].startswith("https")
+
+    def test_a_unit_pins_the_skill_it_actually_ran_with(self, conn, tmp_path):
+        """The whole point: a skill edited mid-run leaves half the units under
+        one version and half under another, and only a record taken at claim
+        time can tell them apart."""
+        f = tmp_path / "s.md"
+        f.write_text("v1 text", encoding="utf-8")
+        sa.register_skill(conn, "sk", source=str(f), version="1.0")
+        sa.define(conn, "x", instructions="go", skills=["sk"])
+        sa.add(conn, "x", ["a", "b"])
+        first = sa.claim(conn, "x", worker="w")[0]
+
+        f.write_text("v2 text, changed", encoding="utf-8")
+        sa.register_skill(conn, "sk", source=str(f), version="2.0")
+        second = sa.claim(conn, "x", worker="w")[0]
+
+        d1 = first.skill_records[0]
+        d2 = second.skill_records[0]
+        assert (d1["version"], d2["version"]) == ("1.0", "2.0")
+        assert d1["digest"] != d2["digest"]
+
+    def test_the_pin_is_stored_not_only_returned(self, conn, tmp_path):
+        f = tmp_path / "s.md"
+        f.write_text("t", encoding="utf-8")
+        sa.register_skill(conn, "sk", source=str(f), version="1.0")
+        sa.define(conn, "x", instructions="go", skills=["sk"])
+        sa.add(conn, "x", ["a"])
+        sa.claim(conn, "x", worker="w")
+        raw = conn.execute("SELECT skills_used FROM unit").fetchone()[0]
+        assert json.loads(raw)[0]["version"] == "1.0"
+
+    def test_an_unregistered_skill_is_surfaced_not_hidden(self, conn):
+        sa.define(conn, "x", instructions="go", skills=["ghost"])
+        sa.add(conn, "x", ["a"])
+        u = sa.claim(conn, "x", worker="w")[0]
+        assert u.skill_records[0]["unregistered"] is True
+        assert "not in the skill registry" in u.brief()
+        listed = {s["name"]: s for s in sa.skills(conn)}
+        assert listed["ghost"]["unregistered"] is True and listed["ghost"]["units"] == 1
+
+    def test_usage_counts_come_from_units_not_from_kinds(self, conn):
+        # A skill named by a kind nobody ran has been used zero times. Counting
+        # mentions would be the sort of number that quietly justifies keeping
+        # something.
+        sa.register_skill(conn, "unused", source="x")
+        sa.define(conn, "x", instructions="go", skills=["unused"])
+        assert {s["name"]: s["units"] for s in sa.skills(conn)}["unused"] == 0
+
+    def test_the_registry_never_fetches_anything(self):
+        src = (ROOT / "src" / "superagentic" / "leases.py").read_text(encoding="utf-8")
+        for net in ("urllib", "requests", "httpx", "socket.create_connection",
+                    "urlopen"):
+            assert net not in src, f"leases.py reaches the network via {net!r}"
+
+    def test_a_kind_naming_unregistered_skills_is_flagged_over_mcp(self, tmp_path):
+        from superagentic.mcp import Server
+        s = Server(tmp_path / "w.db")
+        out = s.define_kind({"kind": "x", "instructions": "go",
+                             "done_when": "d", "skills": ["ghost"]})
+        assert out["unregistered_skills"] == ["ghost"]
+        assert "register_skill" in out["hint"]

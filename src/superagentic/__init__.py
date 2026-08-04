@@ -40,10 +40,13 @@ from .leases import (
     leased,
     progress,
     reclaim,
+    register_skill,
     release,
+    resolve_skills,
     results,
     run,
     runs,
+    skills,
     spec,
     start_run,
     this_worker,
@@ -52,10 +55,11 @@ from .leases import (
     worker_prompt,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = ["DEFAULT_LEASE", "DONE", "FAILED", "LEASED", "MAX_ATTEMPTS", "OPEN",
            "Unit", "add", "claim", "connect", "define", "fail", "failures",
            "finish", "heartbeat", "leased", "progress", "reclaim", "release",
-           "results", "run", "runs", "spec", "start_run", "this_worker",
+           "register_skill", "resolve_skills", "results", "run", "runs",
+           "skills", "spec", "start_run", "this_worker",
            "unit_id", "units", "worker_prompt"]

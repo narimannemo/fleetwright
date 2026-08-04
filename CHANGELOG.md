@@ -5,6 +5,40 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.8.0] — 2026-08-04
+
+### Added
+
+- **A skill registry.** `superagentic skill NAME --source FILE --version V`,
+  `superagentic skills`, plus `register_skill` / `list_skills` over MCP.
+  Previously a kind carried the bare string `xrad-extraction` and nothing
+  anywhere knew what that was, where a worker got it, or which version.
+- **Skills are pinned onto the unit at claim time**, with a content digest when
+  the source is a readable file. This is the part that earns its keep: edit a
+  skill halfway through a run and half the units were produced under one
+  version and half under another — a record taken at claim time is the only
+  thing that can tell them apart. Looking it up later reports whatever it is
+  now, which is the wrong answer.
+- **Skills used but never registered are surfaced**, in the brief, in
+  `superagentic skills`, and in `define_kind`'s reply — a kind naming something
+  nothing records where to get is worth saying out loud.
+- A **Skills** panel in the dashboard.
+
+### Notes
+
+- **Nothing is fetched or installed.** The moment this downloads a skill it has
+  to know about Claude Code's `.claude/skills`, Cursor's rules, and every
+  runtime after them — and it stops working for the shell fleet that has none
+  of those. A test asserts the module never touches the network.
+- Usage counts come from what units pinned, not from which kinds mention a
+  skill. A skill named by a kind nobody ran has been used zero times.
+
+### Fixed
+
+- `superagentic skill` and `skills` flush stdout before writing to stderr. A
+  warning about one invocation was appearing above another's success line,
+  because stderr is unbuffered and stdout is not when piped.
+
 ## [0.7.0] — 2026-08-04
 
 ### Added

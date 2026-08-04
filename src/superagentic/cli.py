@@ -27,6 +27,43 @@ def _conn(a: argparse.Namespace):
     return leases.connect(Path(a.db))
 
 
+def _cmd_skill(a: argparse.Namespace) -> int:
+    r = leases.register_skill(_conn(a), a.name, source=a.source,
+                              version=a.version, note=a.note)
+    print(f"registered {r['name']}"
+          + (f" v{r['version']}" if r["version"] else "")
+          + (f" [{r['digest']}]" if r["digest"] else ""), flush=True)
+    if a.source and not r["digest"]:
+        # Not an error: a URL or a sentence is a legitimate source. But then
+        # nothing can tell one version of it from another later.
+        print("  note: source is not a readable file, so nothing was hashed — "
+              "`--version` is all that will distinguish revisions later",
+              file=sys.stderr)
+    return 0
+
+
+def _cmd_skills(a: argparse.Namespace) -> int:
+    rows = leases.skills(_conn(a))
+    if a.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no skills registered — `superagentic skill <name> --source FILE`")
+        return 0
+    w = max(len(r["name"]) for r in rows) + 2
+    print(f"{'skill':<{w}}{'version':<10}{'digest':<18}{'units':>7}  source",
+          flush=True)
+    for r in rows:
+        mark = "?" if r.get("unregistered") else " "
+        print(f"{mark}{r['name']:<{w - 1}}{(r['version'] or '-'):<10}"
+              f"{(r['digest'] or '-'):<18}{r['units']:>7}  {r['source'] or ''}")
+    sys.stdout.flush()
+    if any(r.get("unregistered") for r in rows):
+        print("\n? used by units but never registered — nothing records where "
+              "to get it", file=sys.stderr)
+    return 0
+
+
 def _cmd_define(a: argparse.Namespace) -> int:
     instructions = a.instructions
     if a.instructions_file:
@@ -282,6 +319,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=50)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=_cmd_runs)
+
+    s = common(sub.add_parser("skill", help="say what a skill name means"))
+    s.add_argument("name")
+    s.add_argument("--source", help="a path, a URL, or a sentence. A readable "
+                                    "file is hashed so revisions are tellable "
+                                    "apart later.")
+    s.add_argument("--version")
+    s.add_argument("--note")
+    s.set_defaults(fn=_cmd_skill)
+
+    s = common(sub.add_parser("skills", help="registered skills and their use"))
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=_cmd_skills)
 
     s = common(sub.add_parser("define", help="say what a kind of work IS"))
     s.add_argument("kind")

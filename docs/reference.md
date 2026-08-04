@@ -5,6 +5,8 @@
 ```
 superagentic start              begin a run; prints its id
 superagentic runs              every run, newest first
+superagentic skill NAME        say what a skill name means
+superagentic skills            registered skills and their use
 superagentic define KIND       say what this kind of work IS
 superagentic add KIND NAME…    enqueue units; --from-file for a corpus
 superagentic claim [KIND]      take work; exits 1 when the queue is dry
@@ -41,6 +43,36 @@ There is no `end`. A run is over when its units are, which has to be derivable
 because the orchestrator is the process most likely to have died.
 
 `--run` also filters `claim`, `status`, `results` and `dashboard`.
+
+### `skill` / `skills`
+
+```bash
+superagentic skill xrad-extraction --source skills/xrad/SKILL.md --version 1.2
+superagentic skill latin-palaeography --source https://example.org/pal --version 0.4
+superagentic skills
+```
+
+```
+skill                version   digest              units  source
+ xrad-extraction     1.2       27efcd11f4a60074      412  skills/xrad/SKILL.md
+ latin-palaeography  0.4       -                     412  https://example.org/pal
+?never-registered    -         -                      18
+```
+
+Without this a kind carries the bare string `xrad-extraction` and nothing
+anywhere knows what that is, where a worker gets it, or which version it was.
+Three kinds needing the same skill repeat the string, and renaming means
+editing all three.
+
+**A readable file is hashed.** That is what makes *"which version did these 400
+units use"* answerable after someone edits a skill halfway through a run —
+`--version` alone relies on the author remembering to bump it.
+
+Skills used by units but never registered are listed with a `?`. That means a
+kind names something nothing records where to get.
+
+**Nothing is fetched or installed.** Distribution belongs to whatever runs your
+agents — see [Concepts](concepts.md).
 
 ### `define`
 

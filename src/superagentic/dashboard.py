@@ -413,6 +413,10 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
     <div class="card"><h2>Workers</h2><div class="scroll" id="workers"></div></div>
     <div class="card"><h2>Could not finish</h2><div class="scroll" id="failures"></div></div>
   </div>
+  <div class="card wide">
+    <h2>Skills in use</h2>
+    <div class="scroll" id="skills"></div>
+  </div>
   <div class="card wide" id="runscard">
     <h2>All runs</h2>
     <div class="scroll" id="runs"></div>
@@ -783,6 +787,24 @@ function render(d) {
       </tr>`).join("")}</table>`
     : `<div class="empty">No worker has finished anything yet.</div>`;
 
+  const sk = d.skills || [];
+  $("#skills").innerHTML = sk.length ? `<table><tr>
+      <th style="width:3px"></th><th>skill</th><th>version</th><th>digest</th>
+      <th class="num">units</th><th>source</th></tr>
+    ${sk.map(k => `<tr class="${k.unregistered ? "attn" : ""}">
+      <td class="stripe"></td>
+      <td class="mono">${esc(k.name)}</td>
+      <td class="muted">${esc(k.version || "—")}</td>
+      <td class="mono muted">${esc(k.digest || "—")}</td>
+      <td class="num">${(k.units || 0).toLocaleString()}</td>
+      <td class="muted">${k.unregistered
+        ? '<span class="pill slow">not registered</span> nothing records where to get this'
+        : esc(k.source || "—")}</td></tr>`).join("")}</table>`
+    : `<div class="empty">No skills registered. A kind can require them with
+       <span class="mono">--skill</span>, and
+       <span class="mono">superagentic skill &lt;name&gt; --source FILE</span>
+       says what the name means.</div>`;
+
   $("#failures").innerHTML = d.failures.length ? `<table><tr>
       <th style="width:3px"></th><th>unit</th><th class="num">tries</th>
       <th>why</th></tr>
@@ -942,6 +964,7 @@ def _payload(conn, run: str | None, *, projects: list[str] | None = None,
     """
     return {**leases.stats(conn, run=run),
             "runs": leases.runs(conn, limit=25),
+            "skills": leases.skills(conn),
             "selected": run,
             "run_meta": leases.run(conn, run) if run else None,
             "projects": projects if projects is not None else [],

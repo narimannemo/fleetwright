@@ -127,6 +127,48 @@ That last part is the point. A unit done without its tools *looks finished*,
 and a queue full of units that look finished is worse than one with obvious
 gaps.
 
+## Skills are registered, pinned, and never fetched
+
+A kind requires skills by name. The registry says what a name **means**:
+
+```bash
+superagentic skill xrad-extraction --source skills/xrad/SKILL.md --version 1.2
+```
+
+Three things follow, and each is a decision:
+
+**One definition, many kinds.** Without a registry every kind carries the bare
+string, three kinds needing the same skill repeat it, and renaming means
+editing all three.
+
+**A readable source is hashed, and the hash is pinned onto the unit at claim
+time.** This is the part that earns its keep. Edit a skill halfway through a
+run and half the units were produced under one version and half under another
+— pinning at claim time is the only thing that can tell them apart afterwards.
+Looking the skill up later reports whatever it is *now*, which is precisely the
+wrong answer:
+
+```
+p1: v1.2 [27efcd11f4a60074]
+p2: v1.3 [783ae7d0b1ef6eb2]      # same run, after someone edited the file
+```
+
+`--version` alone relies on whoever edited it remembering to bump it. The
+digest does not.
+
+**Nothing is fetched or installed, ever.** The moment this downloads a skill it
+has to know about Claude Code's `.claude/skills`, Cursor's rules, and every
+runtime after them — and it stops working for the shell fleet that has none of
+those. It records *where* a skill is and *what it hashed to*; putting it in
+place belongs to whatever runs your agents, and the brief tells the worker to
+fail rather than proceed without it. A test asserts the module never touches
+the network.
+
+**What it cannot do: verify.** Nothing here can check that a worker really
+loaded a skill, any more than it can check the model it claims to be. The brief
+states the requirement and says to fail rather than substitute; whether the
+agent complied is between you and the agent.
+
 ## Context is read-only, and worker-to-worker state is refused
 
 `context` is material every worker of a kind receives: a glossary, conventions,

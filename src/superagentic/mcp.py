@@ -66,6 +66,31 @@ def _tools() -> list[dict]:
                 "limit": {"type": "integer", "default": 25}}},
         },
         {
+            "name": "register_skill",
+            "description": (
+                "Say what a skill name means before a kind requires it: where "
+                "a worker gets it and which version. A readable file is hashed, "
+                "so units claimed before and after an edit are tellable apart "
+                "afterwards. This does NOT fetch or install anything — putting "
+                "the skill in place is your runtime's job."),
+            "inputSchema": {"type": "object", "required": ["name"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "source": {"type": "string", "description":
+                                           "a path, a URL, or a sentence"},
+                                "version": {"type": "string"},
+                                "note": {"type": "string"}}},
+        },
+        {
+            "name": "list_skills",
+            "description": (
+                "Registered skills, their versions, and how many units have "
+                "actually run with each. Skills used but never registered are "
+                "listed too, flagged — that means a kind names something "
+                "nothing records where to get."),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
             "name": "define_kind",
             "description": (
                 "Say what a kind of work IS, once, before enqueueing any of "
@@ -247,12 +272,26 @@ class Server:
     def list_runs(self, a: dict) -> dict:
         return {"runs": leases.runs(self.conn, limit=int(a.get("limit", 25)))}
 
+    def register_skill(self, a: dict) -> dict:
+        return leases.register_skill(self.conn, a["name"], source=a.get("source"),
+                                     version=a.get("version"), note=a.get("note"))
+
+    def list_skills(self, _a: dict) -> dict:
+        return {"skills": leases.skills(self.conn)}
+
     def define_kind(self, a: dict) -> dict:
         leases.define(self.conn, a["kind"], a["instructions"],
                       done_when=a.get("done_when"), returns=a.get("returns"),
                       tools=a.get("tools"), skills=a.get("skills"),
                       mcp=a.get("mcp"), context=a.get("context"))
         out = {"defined": a["kind"]}
+        unknown = [r["name"] for r in leases.resolve_skills(self.conn, a.get("skills"))
+                   if r.get("unregistered")]
+        if unknown:
+            out["unregistered_skills"] = unknown
+            out["hint"] = ("These skills are not registered, so a worker is "
+                           "told to load them but not where to get them. "
+                           "Call register_skill for each.")
         if not a.get("done_when"):
             out["warning"] = ("No done_when. Workers will each decide for "
                               "themselves what finished means, and they will "
@@ -312,6 +351,7 @@ class Server:
                           "returns": u.returns,
                           "tools": u.tools,
                           "skills": list(u.skills),
+                          "skill_records": list(u.skill_records),
                           "mcp": u.mcp or {},
                           "context": u.context,
                           # The same thing as one block of text, because an

@@ -41,6 +41,7 @@ real queue.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -77,6 +78,28 @@ SCHEMA = """
 -- the ninth agent that starts an hour later; a kind is read at claim time by
 -- every worker that ever takes one of these units, including the one that
 -- picks up a unit a dead agent abandoned.
+-- What a skill name MEANS. Without this a kind carries the string
+-- "xrad-extraction" and nothing anywhere knows what that is, where a worker
+-- gets it, or which version it was — so three kinds needing the same skill
+-- repeat the string, and renaming means editing all three.
+--
+-- This registry deliberately does NOT fetch or install anything. Distribution
+-- belongs to whatever runs your agents: the moment this downloads a skill it
+-- needs to know about Claude Code's .claude/skills, Cursor's rules, and every
+-- runtime after them. It records where a skill is and what it hashed to; the
+-- runtime puts it in place.
+CREATE TABLE IF NOT EXISTS skill (
+    name TEXT PRIMARY KEY,
+    source TEXT,
+    version TEXT,
+    -- sha256 of the content, when content was given. This is what makes "which
+    -- version did these 400 units use" answerable after someone edits a skill
+    -- halfway through a run.
+    digest TEXT,
+    note TEXT,
+    updated_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS kind (
     kind TEXT PRIMARY KEY,
     instructions TEXT NOT NULL,
@@ -132,6 +155,11 @@ CREATE TABLE IF NOT EXISTS unit (
     run_id TEXT,
     status TEXT NOT NULL DEFAULT 'open',
     worker TEXT,
+    -- The skill records as they stood WHEN THIS UNIT WAS CLAIMED. Pinned, not
+    -- looked up later: a skill edited mid-run leaves half the units produced
+    -- under one version and half under another, and only a record taken at
+    -- claim time can tell them apart.
+    skills_used TEXT,
     -- What the worker says it is: "claude-opus-5", "gpt-5.4", "a bash script".
     -- Declared, never detected -- nothing here can verify it, and pretending
     -- otherwise would make it evidence when it is only a label. It earns its
@@ -185,6 +213,7 @@ class Unit:
     returns: str = ""
     tools: str = ""
     skills: tuple[str, ...] = ()
+    skill_records: tuple[dict, ...] = ()
     mcp: dict[str, str] | None = None
     context: str = ""
 
@@ -202,7 +231,23 @@ class Unit:
             parts.append(f"\nWHAT TO DO\n{self.instructions}")
         req = []
         if self.skills:
-            req.append("skills: " + ", ".join(self.skills))
+            # Name, version and where to get it. A bare name tells a worker
+            # what to blame, not what to load.
+            for rec in (self.skill_records or
+                        tuple({"name": n} for n in self.skills)):
+                bits = [rec["name"]]
+                if rec.get("version"):
+                    bits.append(f"v{rec['version']}")
+                if rec.get("digest"):
+                    bits.append(f"[{rec['digest']}]")
+                line = "  - " + " ".join(bits)
+                if rec.get("source"):
+                    line += f"\n      from: {rec['source']}"
+                if rec.get("unregistered"):
+                    line += "\n      (not in the skill registry — nothing "
+                    line += "records where to get this)"
+                req.append(line)
+            req.insert(0, "skills:")
         if self.mcp:
             req.append("MCP servers: " + ", ".join(
                 f"{k} ({v})" for k, v in self.mcp.items()))
@@ -253,7 +298,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     machine, with a file they cannot easily recreate.
     """
     for table, cols in (("unit", (("claimed_at", "REAL"), ("result", "TEXT"),
-                                  ("run_id", "TEXT"), ("model", "TEXT"))),
+                                  ("run_id", "TEXT"), ("model", "TEXT"),
+                                  ("skills_used", "TEXT"))),
                         ("kind", (("skills", "TEXT"), ("mcp", "TEXT"),
                                   ("context", "TEXT")))):
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -356,7 +402,8 @@ def spec(conn: sqlite3.Connection, kind: str) -> dict | None:
     return dict(r) if r else None
 
 
-def _to_unit(r: sqlite3.Row, spec_row: sqlite3.Row | None = None) -> Unit:
+def _to_unit(r: sqlite3.Row, spec_row: sqlite3.Row | None = None,
+             pinned=()) -> Unit:
     meta = json.loads(r["meta"] or "{}")
     sp = spec_row or {}
     return Unit(r["unit_id"], r["kind"], r["name"], r["attempts"],
@@ -366,6 +413,8 @@ def _to_unit(r: sqlite3.Row, spec_row: sqlite3.Row | None = None) -> Unit:
                 _render(sp["returns"] if sp else "", r["name"], meta),
                 _render(sp["tools"] if sp else "", r["name"], meta),
                 tuple(json.loads(sp["skills"])) if sp and sp["skills"] else (),
+                tuple(pinned) if pinned else (
+                    tuple(json.loads(r["skills_used"])) if r["skills_used"] else ()),
                 json.loads(sp["mcp"]) if sp and sp["mcp"] else None,
                 _render(sp["context"] if sp else "", r["name"], meta))
 
@@ -447,7 +496,22 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
     # always 20 units of the same kind.
     specs = {k: conn.execute("SELECT * FROM kind WHERE kind = ?", (k,)).fetchone()
              for k in {r["kind"] for r in rows}}
-    return [_to_unit(r, specs.get(r["kind"])) for r in rows]
+    # Pin what the skills were AT CLAIM TIME, and hand the same records to the
+    # caller. Reading them back out of the row would return the value the row
+    # had before this update, and looking them up later would report whatever
+    # they are now — which is the question this exists to answer when someone
+    # edits a skill halfway through a run.
+    pinned: dict[str, list[dict]] = {}
+    for k, sp in specs.items():
+        names = json.loads(sp["skills"]) if sp and sp["skills"] else []
+        pinned[k] = resolve_skills(conn, names) if names else []
+    for r in rows:
+        if pinned.get(r["kind"]):
+            conn.execute("UPDATE unit SET skills_used = ? WHERE unit_id = ?",
+                         (json.dumps(pinned[r["kind"]]), r["unit_id"]))
+    conn.commit()
+    return [_to_unit(r, specs.get(r["kind"]), pinned.get(r["kind"]) or ())
+            for r in rows]
 
 
 def heartbeat(conn: sqlite3.Connection, unit_ids: list[str], *, worker: str,
@@ -935,3 +999,75 @@ def units(conn: sqlite3.Connection, *, run: str | None = None,
                            if r["status"] == LEASED else None),
         } for r in rows],
     }
+
+
+def register_skill(conn: sqlite3.Connection, name: str, *,
+                   source: str | None = None, version: str | None = None,
+                   note: str | None = None, content: str | None = None) -> dict:
+    """Say what a skill name means, once.
+
+    `source` is where a worker gets it — a path, a URL, or a sentence. If it is
+    a readable file and no `content` was passed, the file is read and hashed,
+    so `version` stops being the only thing standing between you and "which of
+    these did the run actually use".
+
+    **Nothing is fetched or installed.** Distribution belongs to whatever runs
+    your agents; the moment this downloads a skill it has to know about Claude
+    Code's `.claude/skills`, Cursor's rules, and every runtime after them. It
+    records where a skill is and what it hashed to. Putting it in place is the
+    runtime's job, and the brief tells the worker to fail rather than proceed
+    without it.
+    """
+    if content is None and source:
+        f = Path(source)
+        try:
+            if f.is_file():
+                content = f.read_text(encoding="utf-8")
+        except OSError:
+            content = None
+    digest = (hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+              if content else None)
+    conn.execute(
+        "INSERT OR REPLACE INTO skill (name, source, version, digest, note, "
+        "updated_at) VALUES (?,?,?,?,?,?)",
+        (name, source, version, digest, note, time.time()))
+    conn.commit()
+    return {"name": name, "source": source, "version": version, "digest": digest}
+
+
+def skills(conn: sqlite3.Connection) -> list[dict]:
+    """Every registered skill, with how much work has actually used it.
+
+    The usage count comes from what units pinned at claim time, not from which
+    kinds mention it — a skill named by a kind nobody ever ran has been used
+    zero times, and saying otherwise would be the sort of number that quietly
+    justifies keeping something.
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM skill ORDER BY name")]
+    used: dict[str, int] = {}
+    for (raw,) in conn.execute(
+            "SELECT skills_used FROM unit WHERE skills_used IS NOT NULL"):
+        for rec in json.loads(raw):
+            used[rec.get("name")] = used.get(rec.get("name"), 0) + 1
+    for r in rows:
+        r["units"] = used.get(r["name"], 0)
+    # Skills that units pinned but nobody registered: worth surfacing, not
+    # hiding, because it means a kind names something undefined.
+    for name, n in sorted(used.items()):
+        if not any(r["name"] == name for r in rows):
+            rows.append({"name": name, "source": None, "version": None,
+                         "digest": None, "note": None, "units": n,
+                         "unregistered": True})
+    return rows
+
+
+def resolve_skills(conn: sqlite3.Connection, names) -> list[dict]:
+    """Skill names to their records, keeping the order the kind declared."""
+    out = []
+    for n in names or ():
+        r = conn.execute("SELECT * FROM skill WHERE name = ?", (n,)).fetchone()
+        out.append(dict(r) if r else {"name": n, "source": None,
+                                      "version": None, "digest": None,
+                                      "unregistered": True})
+    return out
