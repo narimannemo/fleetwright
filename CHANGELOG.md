@@ -7,6 +7,19 @@ and never why.
 
 ## [0.9.2] — 2026-08-04
 
+### Fixed
+
+- **The Windows job failed on a line ending.** `.gitattributes` was empty, so
+  Git's default on Windows rewrites LF to CRLF in the working tree, and a new
+  README test asserted a string spanning two lines against the file's contents.
+  It passed on Linux and macOS and could only ever fail on Windows.
+  `* text=auto eol=lf` now pins the checkout everywhere, every doc read in the
+  suite normalises newlines regardless, and a test reproduces the whole thing
+  without needing Windows by handing those assertions a CRLF file.
+- `subprocess.Popen(..., text=True)` in the cross-process test now passes
+  `encoding="utf-8"`. Without it the pipes decode with the locale codec, which
+  is cp1252 on Windows.
+
 ### Changed
 
 - **README rewritten around what the package is for**, leading with the two

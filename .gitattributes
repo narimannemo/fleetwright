@@ -1,0 +1,12 @@
+# Normalise line endings in the repository and check out LF everywhere,
+# including Windows. Without this, Git's default on Windows rewrites LF to
+# CRLF in the working tree, and any test that asserts a multi-line string
+# against a FILE's contents fails there and only there. That is exactly how
+# v0.9.2 failed its Windows job after passing everywhere else.
+* text=auto eol=lf
+
+# Binary-ish assets are never converted.
+*.png binary
+*.jpg binary
+*.gz  binary
+*.db  binary

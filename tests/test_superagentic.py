@@ -419,7 +419,10 @@ class TestConcurrency:
         )
         procs = [subprocess.Popen([sys.executable, "-c", prog, f"w{i}"],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  text=True) for i in range(3)]
+                                  # text=True alone decodes with the locale
+                                  # codec, which is cp1252 on Windows.
+                                  text=True, encoding="utf-8")
+                 for i in range(3)]
         got = []
         for p in procs:
             out, err = p.communicate(timeout=90)
@@ -1201,7 +1204,7 @@ class TestLicenceBoundary:
             assert "import ee" not in src and "from ee" not in src, f.name
 
     def test_the_boundary_is_written_down_in_both_directions(self):
-        lic = (ROOT / "LICENSING.md").read_text(encoding="utf-8")
+        lic = (ROOT / "LICENSING.md").read_text(encoding="utf-8").replace("\r\n", "\n")
         # It must say what you CAN do, not only what you cannot.
         assert "Apache-2.0" in lic and "ee/" in lic
         # And it must promise the core is not clawed back later.
@@ -1215,11 +1218,11 @@ class TestLicenceBoundary:
             assert not (ROOT / "ee").exists(), \
                 "ee/ is present but has no LICENSE — the boundary is unstated"
             return
-        ee = ee_license.read_text(encoding="utf-8")
+        ee = ee_license.read_text(encoding="utf-8").replace("\r\n", "\n")
         assert "Nothing here restricts the rest of the repository" in ee
 
     def test_there_is_no_cla_only_a_dco(self):
-        c = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        c = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").replace("\r\n", "\n")
         assert "Developer Certificate of Origin" in c
         assert "no contributor licence agreement" in c.lower()
 
@@ -1232,7 +1235,11 @@ class TestReadmeIsTrue:
     most people will ever read, and nothing else in the repo contradicts it."""
 
     def _readme(self):
-        return (ROOT / "README.md").read_text(encoding="utf-8")
+        # Newlines normalised. Git may check the file out with CRLF on Windows
+        # (.gitattributes now forbids it, but a contributor's config still
+        # can), and a multi-line assertion against file contents would then
+        # fail on that platform alone.
+        return (ROOT / "README.md").read_text(encoding="utf-8").replace("\r\n", "\n")
 
     def test_the_mcp_tool_count_is_right(self):
         import re
@@ -1284,3 +1291,32 @@ class TestReadmeIsTrue:
         r = self._readme()
         assert "—" not in r, "em dash in README"
         assert "–" not in r, "en dash in README"
+
+
+class TestLineEndings:
+    def test_the_repo_pins_lf(self):
+        """Without this, Git rewrites LF to CRLF on Windows checkout and any
+        multi-line assertion against a file fails on that platform alone.
+        v0.9.2's Windows job failed for exactly this reason."""
+        ga = ROOT / ".gitattributes"
+        assert ga.exists(), "no .gitattributes; Windows checkouts will be CRLF"
+        assert "text=auto eol=lf" in ga.read_text(encoding="utf-8")
+
+    def test_doc_assertions_survive_a_crlf_checkout(self, monkeypatch):
+        """Behavioural, not a source-shape check.
+
+        Hand the README-truth tests a CRLF version of the file and they must
+        still pass. This is the actual failure that took down v0.9.2's Windows
+        job, reproduced without needing Windows.
+        """
+        real = Path.read_text
+
+        def crlf(self, *a, **kw):
+            out = real(self, *a, **kw)
+            return out.replace("\n", "\r\n") if self.suffix == ".md" else out
+
+        monkeypatch.setattr(Path, "read_text", crlf)
+        t = TestReadmeIsTrue()
+        t.test_the_zero_dependency_claim_is_true()
+        t.test_no_em_dashes()
+        t.test_every_tool_and_command_named_exists()
