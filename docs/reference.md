@@ -10,6 +10,7 @@ superagentic done UNIT_ID      mark finished
 superagentic fail UNIT_ID      report one that could not be done
 superagentic release UNIT_ID   hand back, no attempt burned
 superagentic status            what is left, who holds what
+superagentic prompt [KIND]     the spawn prompt, generated from the kind
 superagentic results [KIND]    what the fleet handed back
 superagentic dashboard         a live view of the fleet, in a browser
 superagentic reclaim           return expired leases now
@@ -98,6 +99,21 @@ does not count against the limit.
 superagentic status --who
 superagentic status extract --json
 ```
+
+### `prompt`
+
+```bash
+superagentic prompt extract --db work.db -n 4
+```
+
+The prompt to spawn workers with, **generated from the kind** rather than
+copied out of documentation. It is generic about the task — that comes from the
+queue at claim time — and specific about what the worker must have, because a
+skill it never loaded is not something it can discover halfway through.
+
+A prompt pasted out of a README drifts from the kind it was written for, and
+nothing tells you when it has. A test asserts every command the prompt prints
+actually parses against the real CLI.
 
 ### `results`
 

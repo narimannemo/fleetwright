@@ -35,12 +35,38 @@ def _cmd_define(a: argparse.Namespace) -> int:
         print("no instructions — pass --instructions or --instructions-file",
               file=sys.stderr)
         return 2
+    mcp = {}
+    for spec in (a.mcp or []):
+        if "=" not in spec:
+            print(f"--mcp must be name=command, got {spec!r}", file=sys.stderr)
+            return 2
+        name, cmd = spec.split("=", 1)
+        mcp[name] = cmd
+    context = (Path(a.context).read_text(encoding="utf-8") if a.context else None)
     leases.define(_conn(a), a.kind, instructions, done_when=a.done_when,
-                  returns=a.returns, tools=a.tools)
+                  returns=a.returns, tools=a.tools, skills=a.skill or None,
+                  mcp=mcp or None, context=context)
     print(f"defined {a.kind}")
     if not a.done_when:
         print("  warning: no --done-when. Every worker will decide for itself "
               "what finished means, and they will not agree.", file=sys.stderr)
+    return 0
+
+
+def _cmd_prompt(a: argparse.Namespace) -> int:
+    conn = _conn(a)
+    if a.kind and leases.spec(conn, a.kind) is None:
+        print(f"{a.kind!r} is not defined — `superagentic define {a.kind} …` first",
+              file=sys.stderr)
+        return 2
+    for i in range(1, a.n + 1):
+        if a.n > 1:
+            print(f"{'=' * 30} worker {i} of {a.n} {'=' * 30}")
+        print(leases.worker_prompt(conn, a.kind, db=a.db,
+                                   worker=f"{a.worker}-{i}" if a.n > 1 else a.worker,
+                                   lease=a.lease))
+        if a.n > 1:
+            print()
     return 0
 
 
@@ -212,8 +238,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--instructions-file", help="read them from a file; - for stdin")
     s.add_argument("--done-when", help="what finished looks like")
     s.add_argument("--returns", help="the shape a worker should hand back")
-    s.add_argument("--tools", help="which tools or MCP servers to use")
+    s.add_argument("--tools", help="free-text hint; prefer --skill and --mcp")
+    s.add_argument("--skill", action="append",
+                   help="a skill a worker MUST load; repeatable")
+    s.add_argument("--mcp", action="append", metavar="NAME=COMMAND",
+                   help="an MCP server a worker MUST have; repeatable")
+    s.add_argument("--context", metavar="FILE",
+                   help="read-only material every worker of this kind receives")
     s.set_defaults(fn=_cmd_define)
+
+    s = common(sub.add_parser(
+        "prompt", help="the spawn prompt for a worker, generated from the kind"))
+    s.add_argument("kind", nargs="?")
+    s.add_argument("-n", type=int, default=1, help="print one per worker")
+    s.add_argument("--worker", default="agent")
+    s.add_argument("--lease", type=float, default=leases.DEFAULT_LEASE)
+    s.set_defaults(fn=_cmd_prompt)
 
     s = common(sub.add_parser("results", help="what the fleet produced"))
     s.add_argument("kind", nargs="?")

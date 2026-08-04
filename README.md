@@ -47,6 +47,21 @@ sa.define(conn, "extract",
 sa.add(conn, "extract", pages, meta={"path": "scans/$name.png"})
 ```
 
+A kind can also say what a worker must **have** — separate from what it must
+**do**, because a skill it never loaded is not something it can discover
+halfway through a unit:
+
+```python
+sa.define(conn, "extract", instructions=...,
+    skills=["xrad-extraction"],
+    mcp={"xrad": "xrad serve --db graph.db"},
+    context=Path("ontology/glossary.md").read_text())
+```
+
+Then `superagentic prompt extract -n 4` generates the spawn prompt from the
+kind, already telling each worker which skills to load and to **fail rather
+than improvise** if it cannot.
+
 Then spawn ten agents with one instruction — *claim work and do it* — and each
 of them is handed this:
 

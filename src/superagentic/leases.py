@@ -83,6 +83,19 @@ CREATE TABLE IF NOT EXISTS kind (
     done_when TEXT,
     returns TEXT,
     tools TEXT,
+    -- What a worker must HAVE to do this work, as opposed to what it must do.
+    -- Both are JSON, and both are opaque here: a skill name means nothing to
+    -- this library, which is the point -- it can be a Claude Code skill, a
+    -- Cursor rule, or a string your own runtime understands. Structured rather
+    -- than prose so the spawner can act on it, and so a worker can REFUSE a
+    -- unit whose requirements it cannot meet instead of improvising.
+    skills TEXT,
+    mcp TEXT,
+    -- Read-only material every worker of this kind gets: a glossary, coding
+    -- conventions, a schema. Deliberately set by whoever defines the kind and
+    -- never written by a worker -- see `context` in docs/concepts.md for why
+    -- worker-to-worker state is refused.
+    context TEXT,
     updated_at REAL
 );
 
@@ -142,6 +155,9 @@ class Unit:
     done_when: str = ""
     returns: str = ""
     tools: str = ""
+    skills: tuple[str, ...] = ()
+    mcp: dict[str, str] | None = None
+    context: str = ""
 
     @property
     def seconds_left(self) -> float:
@@ -155,8 +171,24 @@ class Unit:
                          "this and never finished it.")
         if self.instructions:
             parts.append(f"\nWHAT TO DO\n{self.instructions}")
+        req = []
+        if self.skills:
+            req.append("skills: " + ", ".join(self.skills))
+        if self.mcp:
+            req.append("MCP servers: " + ", ".join(
+                f"{k} ({v})" for k, v in self.mcp.items()))
+        if req:
+            # Stated as a requirement, not a suggestion. A worker that cannot
+            # load these should fail the unit with that reason -- a unit done
+            # without its tools is worse than one left undone, because it looks
+            # finished.
+            parts.append("\nYOU MUST HAVE\n" + "\n".join(req)
+                         + "\nIf any of these is unavailable, call fail with "
+                           "that as the reason. Do not improvise a substitute.")
         if self.tools:
             parts.append(f"\nUSE\n{self.tools}")
+        if self.context:
+            parts.append(f"\nCONTEXT\n{self.context}")
         if self.done_when:
             parts.append(f"\nDONE WHEN\n{self.done_when}")
         if self.returns:
@@ -179,10 +211,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     failure is an OperationalError deep inside a query, on someone else's
     machine, with a file they cannot easily recreate.
     """
-    have = {r["name"] for r in conn.execute("PRAGMA table_info(unit)")}
-    for col, decl in (("claimed_at", "REAL"), ("result", "TEXT")):
-        if col not in have:
-            conn.execute(f"ALTER TABLE unit ADD COLUMN {col} {decl}")
+    for table, cols in (("unit", (("claimed_at", "REAL"), ("result", "TEXT"))),
+                        ("kind", (("skills", "TEXT"), ("mcp", "TEXT"),
+                                  ("context", "TEXT")))):
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, decl in cols:
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     conn.commit()
 
 
@@ -228,7 +263,8 @@ def _render(text: str | None, unit_name: str, meta: dict) -> str:
 
 def define(conn: sqlite3.Connection, kind: str, instructions: str, *,
            done_when: str | None = None, returns: str | None = None,
-           tools: str | None = None) -> None:
+           tools: str | None = None, skills: list[str] | None = None,
+           mcp: dict[str, str] | None = None, context: str | None = None) -> None:
     """Say what this kind of work IS, once, so every worker is told the same thing.
 
     The alternative is putting the instructions in the prompt that spawns the
@@ -244,7 +280,19 @@ def define(conn: sqlite3.Connection, kind: str, instructions: str, *,
                done_when="every claim on the page is recorded, or you have "
                          "established there are none",
                returns='{"claims": <int>, "notes": "<string>"}',
-               tools="the `xrad` MCP server: record_claim, check_quote")
+               skills=["xrad-extraction"],
+               mcp={"xrad": "xrad serve --db graph.db"},
+               context=Path("ontology/glossary.md").read_text())
+
+    `skills` and `mcp` say what a worker must HAVE; `instructions` says what it
+    must DO. They are opaque strings -- a skill name means nothing here, which
+    is what keeps this library agnostic about which agent runtime you use --
+    but they arrive as structured fields so a spawner can act on them and a
+    worker can refuse a unit it is not equipped for.
+
+    `context` is read-only material every worker of this kind receives. It is
+    set here and never written by a worker: see docs/concepts.md for why
+    worker-to-worker state is refused.
 
     Re-defining a kind replaces it. Instructions are read at claim time, so a
     correction reaches every worker that has not yet claimed, without
@@ -252,8 +300,10 @@ def define(conn: sqlite3.Connection, kind: str, instructions: str, *,
     """
     conn.execute(
         "INSERT OR REPLACE INTO kind (kind, instructions, done_when, returns, "
-        "tools, updated_at) VALUES (?,?,?,?,?,?)",
-        (kind, instructions, done_when, returns, tools, time.time()))
+        "tools, skills, mcp, context, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (kind, instructions, done_when, returns, tools,
+         json.dumps(list(skills)) if skills else None,
+         json.dumps(mcp) if mcp else None, context, time.time()))
     conn.commit()
 
 
@@ -271,7 +321,10 @@ def _to_unit(r: sqlite3.Row, spec_row: sqlite3.Row | None = None) -> Unit:
                 _render(sp["instructions"] if sp else "", r["name"], meta),
                 _render(sp["done_when"] if sp else "", r["name"], meta),
                 _render(sp["returns"] if sp else "", r["name"], meta),
-                _render(sp["tools"] if sp else "", r["name"], meta))
+                _render(sp["tools"] if sp else "", r["name"], meta),
+                tuple(json.loads(sp["skills"])) if sp and sp["skills"] else (),
+                json.loads(sp["mcp"]) if sp and sp["mcp"] else None,
+                _render(sp["context"] if sp else "", r["name"], meta))
 
 
 def add(conn: sqlite3.Connection, kind: str, names: list[str], *,
@@ -586,3 +639,71 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40) -> dict:
         "units_per_min": round(per_sec * 60, 1),
         "eta_seconds": round(left / per_sec) if per_sec and left else None,
     }
+
+
+#: The worker loop, as a prompt. Kept here rather than in the docs because a
+#: template that lives in prose gets copied, edited, and drifts — and the copy
+#: that drifts is the one running your fleet at 3am.
+WORKER_PROMPT = """You are ONE WORKER IN A FLEET. Other agents are working this \
+same queue right now. Your worker name is `$worker`.
+
+You have not been told what the work is. That is deliberate — the queue will
+tell you.$requires
+
+STEP 1 — claim a unit:
+    $claim_cmd
+  If that exits non-zero and prints nothing, THE QUEUE IS EMPTY. Stop
+  immediately and report. Do NOT invent work. Do NOT go looking for things to
+  process on your own.
+
+STEP 2 — the output IS your assignment. It says what to do, what counts as
+  done, and the exact shape to hand back. Do exactly that and nothing more.
+
+STEP 3 — report the result:
+    $done_cmd
+  If that says the lease expired, do not argue — claim a different unit.
+
+STEP 4 — go back to STEP 1.
+
+RULES
+- Never work on a unit you did not claim.
+- Never claim a second unit before finishing the first.
+- Stop the moment the queue is empty.
+
+Your final message: how many units you completed, and their names."""
+
+
+def worker_prompt(conn: sqlite3.Connection, kind: str | None = None, *,
+                  db: str = "work.db", worker: str = "agent-1",
+                  lease: float = DEFAULT_LEASE) -> str:
+    """The prompt to spawn a worker with, generated from the kind.
+
+    The template is deliberately generic about the *task* — that comes from the
+    queue at claim time — but specific about what the worker must HAVE, because
+    a skill it never loaded is not something it can discover halfway through.
+
+    Generated rather than copied. A prompt pasted out of documentation drifts
+    from the kind it was written for, and nothing tells you when it has.
+    """
+    sp = spec(conn, kind) if kind else None
+    req = ""
+    if sp:
+        bits = []
+        if sp.get("skills"):
+            bits.append("- load these skills first: "
+                        + ", ".join(json.loads(sp["skills"])))
+        if sp.get("mcp"):
+            bits.append("- these MCP servers must be configured: "
+                        + ", ".join(f"{k} ({v})"
+                                    for k, v in json.loads(sp["mcp"]).items()))
+        if bits:
+            req = ("\n\nBEFORE YOU CLAIM ANYTHING\n" + "\n".join(bits)
+                   + "\nIf you cannot, say so and stop. Do not start work you "
+                     "are not equipped for.")
+    k = f" {kind}" if kind else ""
+    return Template(WORKER_PROMPT).safe_substitute(
+        worker=worker, requires=req,
+        claim_cmd=f"superagentic claim{k} --db {db} --brief "
+                  f"--worker {worker} --lease {lease:g}",
+        done_cmd=f"superagentic done <unit_id> --db {db} --worker {worker} "
+                 f"--result '<the JSON the brief asked for>'")

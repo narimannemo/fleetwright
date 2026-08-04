@@ -61,7 +61,19 @@ def _tools() -> list[dict]:
                     "returns": {"type": "string", "description":
                                 "The shape to hand back to finish_job."},
                     "tools": {"type": "string", "description":
-                              "Which tools or MCP servers to use."}}},
+                              "Free-text hint. Prefer `skills` and `mcp`."},
+                    "skills": {"type": "array", "items": {"type": "string"},
+                               "description":
+                               "Skills a worker MUST load before starting. A "
+                               "worker that cannot load one should FAIL the "
+                               "unit rather than improvise."},
+                    "mcp": {"type": "object", "description":
+                            "MCP servers a worker must have, as "
+                            "{name: command}."},
+                    "context": {"type": "string", "description":
+                                "Read-only material every worker of this kind "
+                                "receives: a glossary, conventions, a schema. "
+                                "Never written by a worker."}}},
         },
         {
             "name": "add_jobs",
@@ -77,6 +89,19 @@ def _tools() -> list[dict]:
                     "names": {"type": "array", "items": {"type": "string"}},
                     "priority": {"type": "integer", "default": 0},
                     "meta": {"type": "object"}}},
+        },
+        {
+            "name": "worker_prompt",
+            "description": (
+                "The prompt to spawn workers with, generated from the kind. "
+                "Use this rather than writing one: it already tells the worker "
+                "to claim before starting, to load the skills the kind "
+                "requires, and to STOP when the queue is empty. Spawn every "
+                "worker in one message so they run concurrently."),
+            "inputSchema": {"type": "object", "properties": {
+                "kind": {"type": "string"},
+                "n": {"type": "integer", "default": 1},
+                "db": {"type": "string", "default": "work.db"}}},
         },
         {
             "name": "job_results",
@@ -179,7 +204,8 @@ class Server:
     def define_kind(self, a: dict) -> dict:
         leases.define(self.conn, a["kind"], a["instructions"],
                       done_when=a.get("done_when"), returns=a.get("returns"),
-                      tools=a.get("tools"))
+                      tools=a.get("tools"), skills=a.get("skills"),
+                      mcp=a.get("mcp"), context=a.get("context"))
         out = {"defined": a["kind"]}
         if not a.get("done_when"):
             out["warning"] = ("No done_when. Workers will each decide for "
@@ -198,6 +224,21 @@ class Server:
                            priority=int(a.get("priority", 0)),
                            meta=a.get("meta"))
         return {"added": added, "already_queued": len(a["names"]) - added}
+
+    def worker_prompt(self, a: dict) -> dict:
+        kind = a.get("kind")
+        if kind and leases.spec(self.conn, kind) is None:
+            return {"ok": False, "error": "undefined_kind",
+                    "message": f"define_kind({kind!r}) first"}
+        n = int(a.get("n", 1))
+        db = a.get("db", "work.db")
+        return {"prompts": [
+            leases.worker_prompt(self.conn, kind, db=db,
+                                 worker=f"agent-{i}" if n > 1 else "agent-1")
+            for i in range(1, n + 1)],
+            "note": "Spawn these in ONE message so the workers run at the "
+                    "same time. Each is already told to stop when the queue "
+                    "is empty."}
 
     def job_results(self, a: dict) -> dict:
         rows = leases.results(self.conn, a.get("kind"))
@@ -218,6 +259,9 @@ class Server:
                           "done_when": u.done_when,
                           "returns": u.returns,
                           "tools": u.tools,
+                          "skills": list(u.skills),
+                          "mcp": u.mcp or {},
+                          "context": u.context,
                           # The same thing as one block of text, because an
                           # agent handed four fields will read one of them.
                           "brief": u.brief()}

@@ -5,6 +5,41 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.2.0] — 2026-08-04
+
+### Added
+
+- **A kind can declare what a worker must HAVE**, not only what it must do:
+  `skills=[...]`, `mcp={name: command}`, `context=...` — and `--skill`,
+  `--mcp name=cmd`, `--context FILE` on the CLI. They arrive as structured
+  fields rather than the free-text `tools` hint, so a spawner can act on them
+  and the brief tells the worker to **fail a unit it is not equipped for
+  instead of improvising**. A unit done without its tools looks finished, which
+  is worse than one left undone.
+  The strings stay opaque — a skill name means nothing here, which is what
+  keeps this agnostic about which agent runtime you use.
+- **`superagentic prompt <kind>`** and the `worker_prompt` MCP tool: the spawn
+  prompt, generated from the kind. Generic about the task, because that comes
+  from the queue at claim time; specific about the capabilities, because a
+  skill a worker never loaded is not something it can discover halfway through.
+  A test parses every command the prompt prints against the real CLI — a prompt
+  naming a flag that does not exist is worse than no prompt.
+- **`context`**: read-only material every worker of a kind receives.
+
+### Notes
+
+- **Worker-to-worker mutable state is refused, and it is a correctness
+  argument.** Units must be independent; leases are at-least-once, so any unit
+  may run twice. If A writes context B reads, re-running A silently changes B's
+  input and nothing in the results would show it. Stages hand things forward
+  explicitly with `result=` and `then=`. Written up in docs/concepts.md.
+- **No supervisor agent, deliberately.** Spawning would mean this package
+  needed an agent runtime, credentials, and an opinion about which one — and it
+  would stop working for the shell fleet that needs none of those. It generates
+  the prompt; running it is your runtime's job.
+- `connect()` migrates the three new `kind` columns, so a 0.1.0 database keeps
+  working. Tested against a hand-built old schema.
+
 ## [0.1.0] — 2026-08-04
 
 First release.

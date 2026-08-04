@@ -124,6 +124,94 @@ class TestTheBrief:
         assert u.instructions == "" and u.name in u.brief()
 
 
+class TestCapabilities:
+    """What a worker must HAVE, as opposed to what it must DO."""
+
+    def test_skills_and_servers_reach_the_worker_as_data_not_prose(self, conn):
+        sa.define(conn, "x", instructions="go", skills=["a-skill", "b-skill"],
+                  mcp={"xrad": "xrad serve --db g.db"})
+        sa.add(conn, "x", ["u1"])
+        u = sa.claim(conn, "x", worker="w")[0]
+        assert u.skills == ("a-skill", "b-skill")
+        assert u.mcp == {"xrad": "xrad serve --db g.db"}
+
+    def test_the_brief_states_them_as_a_requirement_not_a_suggestion(self, conn):
+        sa.define(conn, "x", instructions="go", skills=["a-skill"])
+        sa.add(conn, "x", ["u1"])
+        b = sa.claim(conn, "x", worker="w")[0].brief()
+        assert "YOU MUST HAVE" in b
+        # A unit done without its tools looks finished, which is worse than
+        # one left undone. The brief has to say so.
+        assert "call fail" in b and "improvise" in b
+
+    def test_context_is_carried_and_templated(self, conn):
+        sa.define(conn, "x", instructions="go",
+                  context="Glossary for $name: see $path")
+        sa.add(conn, "x", ["u1"], meta={"path": "g.md"})
+        assert "Glossary for u1: see g.md" in sa.claim(conn, "x", worker="w")[0].context
+
+    def test_a_kind_with_no_capabilities_says_nothing_about_them(self, conn):
+        sa.define(conn, "x", instructions="go")
+        sa.add(conn, "x", ["u1"])
+        assert "YOU MUST HAVE" not in sa.claim(conn, "x", worker="w")[0].brief()
+
+    def test_an_older_database_gains_the_columns(self, tmp_path):
+        """A file written before these columns existed must keep working."""
+        import sqlite3
+        db = tmp_path / "old.db"
+        c = sqlite3.connect(db)
+        c.executescript("""CREATE TABLE kind (kind TEXT PRIMARY KEY,
+            instructions TEXT NOT NULL, done_when TEXT, returns TEXT,
+            tools TEXT, updated_at REAL);
+            INSERT INTO kind VALUES ('x','go',NULL,NULL,NULL,0);""")
+        c.commit()
+        c.close()
+        conn = sa.connect(db)                      # must migrate, not explode
+        sa.define(conn, "y", instructions="go", skills=["s"])
+        assert sa.spec(conn, "x")["skills"] is None
+        assert json.loads(sa.spec(conn, "y")["skills"]) == ["s"]
+
+
+class TestWorkerPrompt:
+    def test_it_tells_the_worker_to_stop_on_an_empty_queue(self, conn):
+        p = sa.worker_prompt(conn, db="w.db")
+        assert "QUEUE IS EMPTY" in p and "Do NOT invent work" in p
+
+    def test_it_names_the_required_skills_before_the_claim_step(self, conn):
+        sa.define(conn, "x", instructions="go", skills=["needed"],
+                  mcp={"srv": "cmd"})
+        p = sa.worker_prompt(conn, "x", db="w.db")
+        assert p.index("BEFORE YOU CLAIM ANYTHING") < p.index("STEP 1")
+        assert "needed" in p and "srv (cmd)" in p
+
+    def test_the_commands_it_prints_are_the_real_ones(self, conn, tmp_path):
+        # A prompt that names a flag the CLI does not have is worse than no
+        # prompt: the worker runs it, fails, and reports something confusing.
+        from superagentic.cli import build_parser
+        sa.define(conn, "x", instructions="go")
+        p = sa.worker_prompt(conn, "x", db=str(tmp_path / "w.db"))
+        import shlex
+        parser = build_parser()
+        checked = 0
+        for line in p.splitlines():
+            line = line.strip()
+            if not line.startswith("superagentic "):
+                continue
+            # shlex, not split(): `--result '<the JSON the brief asked for>'`
+            # is ONE argument and naive splitting turns it into six.
+            # Placeholders are SUBSTITUTED, not dropped -- dropping them leaves
+            # `--result` with no value and the arity check stops meaning
+            # anything.
+            argv = ["x" if t.startswith("<") else t for t in shlex.split(line)[1:]]
+            parser.parse_args(argv)          # SystemExit if a flag is wrong
+            checked += 1
+        assert checked >= 2, "the prompt stopped naming any commands"
+
+    def test_no_kind_still_produces_a_usable_prompt(self, conn):
+        p = sa.worker_prompt(conn, db="w.db")
+        assert "superagentic claim --db w.db" in p
+
+
 class TestResults:
     def test_a_worker_hands_back_output_the_orchestrator_collects(self, conn):
         sa.define(conn, "x", instructions="do it")
@@ -328,9 +416,10 @@ class TestMCP:
         s = self._server(tmp_path)
         listed = s.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {t["name"] for t in listed["result"]["tools"]}
-        assert names == {"define_kind", "add_jobs", "job_results",
-                         "claim_job", "finish_job", "release_job", "fail_job",
-                         "heartbeat_job", "job_status"}
+        assert names == {"define_kind", "add_jobs", "worker_prompt",
+                         "job_results", "claim_job", "finish_job",
+                         "release_job", "fail_job", "heartbeat_job",
+                         "job_status"}
         for n in names:
             assert callable(getattr(s, n)), f"{n} is advertised but not implemented"
 

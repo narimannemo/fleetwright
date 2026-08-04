@@ -51,6 +51,14 @@ superagentic define extract --db work.db \
   Without it each worker decides for itself when to stop, and they disagree.
   Both the CLI and the MCP tool warn if you leave it out.
 - **`--returns`** — the shape to hand back, so results are comparable.
+- **`--skill` / `--mcp`** — what a worker must *have*, repeatable. These arrive
+  as structured fields and the brief tells the worker to **fail rather than
+  improvise** if it cannot load one. A unit done without its tools looks
+  finished, which is worse than one left undone.
+- **`--context FILE`** — read-only material every worker of this kind receives.
+  Never written by a worker: units must stay independent, and leases are
+  at-least-once, so shared mutable state means a re-run silently changes
+  someone else's input.
 - `$name` is the unit; `$key` is any value in that unit's `meta`. Substitution
   tolerates JSON braces and leaves unknown `$placeholders` alone.
 
@@ -70,8 +78,14 @@ Use **absolute paths**. Workers may not share your working directory.
 
 ### 3. Spawn workers with a generic prompt
 
-The prompt says nothing about the task. That is the point — copy this verbatim
-and change only the worker name, the kind, and the db path:
+Do not write the prompt by hand — generate it from the kind, so it already
+names the skills the kind requires:
+
+```bash
+superagentic prompt extract --db work.db -n 4
+```
+
+It produces the template below. Copy it only if you cannot run the command:
 
 > You are ONE WORKER IN A FLEET. Other agents are working the same queue right
 > now. Your worker name is `agent-N`.

@@ -103,6 +103,56 @@ belongs.
 decides it is not the right one to do. It hands the unit straight back without
 being treated as a failure.
 
+## Capabilities: what a worker must HAVE
+
+`instructions` says what to do. `skills` and `mcp` say what a worker needs
+before it can do anything at all, and they are separate for a reason: a skill a
+worker never loaded is not something it can discover halfway through a unit.
+
+```python
+sa.define(conn, "extract",
+    instructions="Read $path. Record every claim it makes.",
+    skills=["xrad-extraction", "latin-palaeography"],
+    mcp={"xrad": "xrad serve --db graph.db"})
+```
+
+They are opaque strings. A skill name means nothing to this library — it can be
+a Claude Code skill, a Cursor rule, or a token your own runtime understands —
+which is exactly what keeps this agnostic about how you run agents. What
+changes is that they arrive as **structured fields rather than prose**, so a
+spawner can act on them, and the brief tells the worker to **fail a unit it is
+not equipped for rather than improvise a substitute**.
+
+That last part is the point. A unit done without its tools *looks finished*,
+and a queue full of units that look finished is worse than one with obvious
+gaps.
+
+## Context is read-only, and worker-to-worker state is refused
+
+`context` is material every worker of a kind receives: a glossary, conventions,
+a schema. It is set when the kind is defined and no worker can write it.
+
+That asymmetry is deliberate, and it is a correctness argument rather than a
+preference:
+
+> Units must be independent. Leases are **at-least-once**, so any unit may be
+> run twice. If worker A writes context that worker B reads, re-running A
+> silently changes B's input — and you would never find that from the results.
+
+It also converts an unordered queue into an ordered one without saying so.
+Every guarantee here rests on units not depending on each other; shared mutable
+state removes that quietly.
+
+When a stage genuinely must hand something forward, do it explicitly:
+
+```python
+sa.finish(conn, u.unit_id, result={"claims": ids},
+          then={"audit": [f"claim-{i}" for i in ids]})
+```
+
+Ordered, visible in the queue, idempotent, and refused outright if the
+finishing worker had already lost its lease.
+
 ## `kind` and `name` are opaque
 
 They are strings you chose. Nothing here parses them, and a unit is keyed on
@@ -121,3 +171,10 @@ opinions about your pipeline, and the next person has to work around them.
 - **Not exactly-once.** Nothing is.
 - **No progress inside a unit.** A unit is atomic here. Make them small enough
   that losing one costs little.
+- **No shared mutable state between workers.** See above — it is refused, not
+  merely absent.
+- **It does not spawn anything.** `superagentic prompt` generates the prompt to
+  spawn workers with; running it is your runtime's job. Making this package
+  spawn agents would mean it needed an agent runtime, credentials, and an
+  opinion about which one — and it would stop working for the shell fleet that
+  needs none of those.
