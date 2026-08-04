@@ -222,6 +222,7 @@ disturb the run, and bound to loopback because it has no authentication.
 |---|---|
 | [Concepts](docs/concepts.md) | leases, attempts, and what this deliberately is not |
 | [MCP](docs/mcp.md) | wiring it to Claude Code, Cursor, or your own agent |
+| [Dashboard](docs/dashboard.md) | what each panel answers, and why percentiles not averages |
 | [Reference](docs/reference.md) | every command and the Python API |
 | [Packaging](packaging/README.md) | uv, Homebrew, pip — and which to use |
 | [Skill](skills/README.md) | drop-in Claude Code skill, so an agent knows how to run a fleet |
