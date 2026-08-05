@@ -40,6 +40,16 @@ def _tools() -> list[dict]:
         # work here first, so the workers it spawns need no prompt beyond
         # "claim work and do it".
         {
+            "name": "project_state",
+            "description": (
+                "CALL THIS FIRST in a new session, before anything else. Where "
+                "this project is: which runs exist and which are still going, "
+                "how much is done, what failed, what needs a human, and the "
+                "single next command. You have no memory of previous sessions "
+                "and this is how you get it."),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
             "name": "start_run",
             "description": (
                 "BEGIN A RUN BEFORE ENQUEUEING ANYTHING. A run is one execution "
@@ -272,6 +282,9 @@ class Server:
         self.worker = leases.this_worker()
 
     # -- tools -------------------------------------------------------------
+
+    def project_state(self, _a: dict) -> dict:
+        return leases.state(self.conn)
 
     def start_run(self, a: dict) -> dict:
         rid = leases.start_run(self.conn, label=a.get("label"),

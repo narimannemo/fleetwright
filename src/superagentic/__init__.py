@@ -60,6 +60,7 @@ from .leases import (
     skills,
     spec,
     start_run,
+    state,
     this_worker,
     unit_id,
     units,
@@ -78,7 +79,7 @@ def skill_text() -> str:
     return (Path(__file__).parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 __all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
@@ -86,6 +87,6 @@ __all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "finish", "heartbeat", "iter_results", "kind_digest",
            "kind_versions", "leased", "progress", "reclaim", "release",
            "outstanding", "register_skill", "resolve_skills", "results", "retry",
-           "run", "runs",
+           "run", "runs", "state",
            "skills", "spec", "start_run", "this_worker",
            "config", "shape", "skill_text", "unit_id", "units", "worker_prompt"]

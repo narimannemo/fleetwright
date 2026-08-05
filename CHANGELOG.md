@@ -5,6 +5,36 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.17.0] — 2026-08-05
+
+### Added
+
+- **`superagentic state`, and `project_state` over MCP.** The first thing a
+  session that has just arrived should run. It **finds the database even if you
+  do not know its name** (recognised by its tables, so it cannot pick up
+  someone else's SQLite file), and reports which runs exist, which are still
+  going, how much is done, and what needs a human.
+
+  Every line under NEEDS ATTENTION carries **what to do about it**. A summary
+  that reports three failures without saying `superagentic retry` has moved the
+  work of knowing the tool onto whoever is reading it, which for a fresh agent
+  is the entire problem. It detects failures nobody retried, units held far
+  longer than usual, skills whose source changed since registration, and skills
+  a kind requires that nothing registers.
+
+  It ends with the single next command rather than leaving that to be inferred.
+  In an empty directory it says how to start instead.
+
+- The skill now tells a new session to run it before deciding anything, and to
+  **join a run that is still going rather than starting a second one over the
+  same work**. The MCP tool description says CALL THIS FIRST.
+
+### Fixed
+
+- Three copies of the same "which commands does this document name" regex had
+  drifted apart, and one of them read `superagentic 0.16.0` in a sample of
+  output as a command called `0`. There is one helper now.
+
 ## [0.16.0] — 2026-08-05
 
 Both of these come from asking what two Claude sessions sharing one database

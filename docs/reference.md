@@ -3,6 +3,7 @@
 ## Commands
 
 ```
+superagentic state             where this project is; run this first
 superagentic init              write a starter superagentic.toml
 superagentic apply             register skills and define kinds from it
 superagentic start              begin a run; prints its id
@@ -32,6 +33,39 @@ superagentic demo              a fleet, a crash, a recovery
 ```
 
 Every command except `demo` takes `--db` (default `work.db`).
+
+### `state`
+
+**The first thing to run in a session that has just arrived.** It finds the
+database even if you do not know its name, and ends with the single next
+command rather than leaving that to be inferred.
+
+```
+superagentic 0.16.0 · work.db
+  520 units: 412 done, 3 failed, 99 waiting, 6 in flight
+  kinds: audit, extract
+  skills: house-style, xrad-extraction
+
+RUNS
+ *20260805-150055-1ce3  extract tomus II       412/520   3 failed  14m
+  20260804-165650-24a8  audit tomus I           90/90              9m
+
+NEEDS ATTENTION
+  3 unit(s) no worker could finish
+    p0071: no text layer in the scan; p0114: OCR returned 0 characters
+    -> superagentic retry --all   # after fixing the cause
+
+NEXT
+  superagentic wait --run 20260805-150055-1ce3   # 105 unit(s) left
+```
+
+A summary that reports three failures without saying `superagentic retry` has
+moved the work of knowing the tool onto whoever is reading it, which for a
+fresh agent is the entire problem. Every line under NEEDS ATTENTION carries
+what to do about it.
+
+Over MCP the same thing is `project_state`, and its description tells an agent
+to call it before anything else.
 
 ### `init` / `apply`
 

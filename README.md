@@ -237,9 +237,13 @@ fi
 
 ## From an agent
 
-Fourteen MCP tools, split by who uses them.
+Fifteen MCP tools, split by who uses them.
 
-**The orchestrator** uses `start_run`, `register_skill`, `define_kind`,
+**A session that has just arrived** calls `project_state` first: which runs
+exist, which are still going, what failed, and the single next command. You
+have no memory of the last session and that is how you get it.
+
+**The orchestrator** then uses `start_run`, `register_skill`, `define_kind`,
 `add_jobs`, `worker_prompt`, `job_results`, `list_runs` and `list_skills`. It
 can stand up an entire fleet without touching a shell.
 

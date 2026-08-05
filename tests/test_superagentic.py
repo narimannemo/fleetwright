@@ -538,10 +538,10 @@ class TestMCP:
         s = self._server(tmp_path)
         listed = s.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {t["name"] for t in listed["result"]["tools"]}
-        assert names == {"start_run", "list_runs", "register_skill",
-                         "list_skills", "define_kind", "add_jobs",
-                         "worker_prompt", "job_results", "claim_job",
-                         "finish_job", "release_job", "fail_job",
+        assert names == {"project_state", "start_run", "list_runs",
+                         "register_skill", "list_skills", "define_kind",
+                         "add_jobs", "worker_prompt", "job_results",
+                         "claim_job", "finish_job", "release_job", "fail_job",
                          "heartbeat_job", "job_status"}
         for n in names:
             assert callable(getattr(s, n)), f"{n} is advertised but not implemented"
@@ -617,8 +617,11 @@ def commands_named_in(text: str) -> set[str]:
     invocation.
     """
     import re
-    return (set(re.findall(r"^\s*superagentic ([\w-]+)", text, re.M))
-            | set(re.findall(r"`superagentic ([\w-]+)", text)))
+    found = (set(re.findall(r"^\s*superagentic ([\w-]+)", text, re.M))
+             | set(re.findall(r"`superagentic ([\w-]+)", text)))
+    # `superagentic 0.16.0 · work.db` in a sample of output is not a command
+    # called `0`. Command names never start with a digit.
+    return {c for c in found if not c[0].isdigit()}
 
 
 class TestDocs:
@@ -631,9 +634,11 @@ class TestDocs:
     def test_the_reference_matches_the_cli(self):
         from superagentic.cli import build_parser
         real = set(build_parser()._subparsers._group_actions[0].choices)
-        doc = set(re.findall(r"^superagentic ([\w-]+)",
-                             (ROOT / "docs" / "reference.md").read_text(encoding="utf-8"),
-                             re.M))
+        # The shared helper, so the digit filter and the invocation rule live
+        # in one place. Three copies of this regex is how `superagentic 0.16.0`
+        # in a sample of output became a command called `0`.
+        doc = commands_named_in(
+            (ROOT / "docs" / "reference.md").read_text(encoding="utf-8"))
         assert not doc - real, f"documented but absent: {sorted(doc - real)}"
         assert not real - doc, f"undocumented commands: {sorted(real - doc)}"
 
@@ -1293,7 +1298,8 @@ class TestReadmeIsTrue:
 
         from superagentic.mcp import _tools
         words = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
-                 "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17}
+                 "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+                 "eighteen": 18}
         m = re.search(r"([A-Za-z]+) MCP tools", self._readme())
         assert m, "the README no longer states a tool count"
         assert words[m[1].lower()] == len(_tools()), \
@@ -2133,3 +2139,81 @@ class TestKindVersioning:
 
     def test_brief_on_an_unknown_unit_is_none(self, conn):
         assert sa.brief_for(conn, "nope:nope") is None
+
+
+class TestProjectState:
+    """A new session knows nothing. This is how it finds out."""
+
+    def test_it_finds_a_database_it_was_not_told_about(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        cli_main(["add", "k", "u", "--db", "corpus.db"])
+        capsys.readouterr()
+        assert cli_main(["state"]) == 0            # no --db given
+        assert "corpus.db" in capsys.readouterr().out
+
+    def test_it_does_not_mistake_someone_elses_sqlite_file(self, tmp_path, monkeypatch, capsys):
+        import sqlite3
+        monkeypatch.chdir(tmp_path)
+        c = sqlite3.connect("notes.db")
+        c.execute("CREATE TABLE thoughts (t TEXT)")
+        c.commit()
+        c.close()
+        capsys.readouterr()
+        cli_main(["state"])
+        assert "no superagentic database" in capsys.readouterr().out
+
+    def test_an_empty_project_is_told_how_to_start(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        assert cli_main(["state"]) == 0
+        out = capsys.readouterr().out
+        assert "install-skill" in out and "init" in out
+
+    def test_every_problem_carries_what_to_do_about_it(self, conn, tmp_path):
+        """A summary that reports three failures without saying `retry` has
+        moved the work of knowing the tool onto whoever is reading it, which
+        for a fresh agent is the whole problem."""
+        f = tmp_path / "s.md"
+        f.write_text("original", encoding="utf-8")
+        sa.register_skill(conn, "sk", source=str(f), version="1")
+        sa.define(conn, "k", instructions="go", skills=["sk", "ghost"])
+        sa.add(conn, "k", ["bad", "b", "c"])
+        for _ in range(3):
+            u = sa.claim(conn, "k", worker="w")[0]
+            sa.fail(conn, u.unit_id, worker="w", note="no text layer")
+        f.write_text("edited since", encoding="utf-8")
+        st = sa.state(conn)
+        assert st["attention"], "nothing flagged"
+        assert all(item["do"] for item in st["attention"])
+        joined = " ".join(i["what"] for i in st["attention"])
+        assert "could finish" in joined and "changed" in joined
+        assert "never registered" in joined
+
+    def test_next_points_at_the_live_run(self, conn):
+        r = sa.start_run(conn, label="L")
+        sa.add(conn, "k", ["a", "b"], run=r)
+        assert f"wait --run {r}" in sa.state(conn)["next"]
+
+    def test_next_is_retry_when_everything_stopped_and_something_failed(self, conn):
+        sa.add(conn, "k", ["bad"])
+        for _ in range(3):
+            u = sa.claim(conn, "k", worker="w")[0]
+            sa.fail(conn, u.unit_id, worker="w", note="n")
+        assert "retry" in sa.state(conn)["next"]
+
+    def test_next_is_setup_when_there_is_nothing(self, conn):
+        assert "init" in sa.state(conn)["next"]
+
+    def test_units_enqueued_without_a_run_are_surfaced(self, conn):
+        sa.add(conn, "k", ["a"])
+        assert sa.state(conn)["totals"]["ungrouped"] == 1
+
+    def test_mcp_exposes_it_and_says_to_call_it_first(self, tmp_path):
+        from superagentic.mcp import Server, _tools
+        t = next(x for x in _tools() if x["name"] == "project_state")
+        assert "FIRST" in t["description"]
+        s = Server(tmp_path / "w.db")
+        assert "next" in s.project_state({})
+
+    def test_the_skill_tells_a_new_session_to_orient(self):
+        import superagentic
+        assert "superagentic state" in superagentic.skill_text()

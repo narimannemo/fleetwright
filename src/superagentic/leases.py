@@ -1364,3 +1364,93 @@ def brief_for(conn: sqlite3.Connection, unit_id: str) -> str | None:
                           (r["kind"],)).fetchone()
     pinned = json.loads(r["skills_used"]) if r["skills_used"] else ()
     return _to_unit(r, sp, pinned).brief()
+
+
+def state(conn: sqlite3.Connection, *, stale_after: float = 0.0) -> dict:
+    """Where this project is, for something that has just arrived.
+
+    A new session knows nothing: not which runs exist, not which are still
+    going, not what broke. `status` answers "how many units of each kind",
+    which is the second question. This is the first one, and it ends with the
+    literal next command rather than leaving that to be inferred.
+
+    Everything here is a fact plus what to do about it. A summary that reports
+    three failures without saying `superagentic retry` has moved the work of
+    knowing the tool onto whoever is reading, which for a fresh agent is the
+    whole problem.
+    """
+    now = time.time()
+    reclaim(conn)
+    rs = runs(conn, limit=10)
+    live = [r for r in rs if r["running"]]
+    prog = progress(conn)
+    totals = {s: sum(p[s] for p in prog.values()) for s in STATUSES}
+    ungrouped = conn.execute(
+        "SELECT count(*) FROM unit WHERE run_id IS NULL").fetchone()[0]
+
+    attention: list[dict] = []
+    if totals[FAILED]:
+        bad = failures(conn)[:3]
+        attention.append({
+            "what": f"{totals[FAILED]} unit(s) no worker could finish",
+            "detail": "; ".join(f"{b['name']}: {b['note'] or '?'}" for b in bad),
+            "do": "superagentic retry --all   # after fixing the cause",
+        })
+    held = leased(conn)
+    stuck = [h for h in held
+             if h["claimed_at"] and now - h["claimed_at"] > (stale_after or 900)]
+    if stuck:
+        attention.append({
+            "what": f"{len(stuck)} unit(s) held for a long time",
+            "detail": ", ".join(f"{h['name']} by {h['worker']}" for h in stuck[:3]),
+            "do": "superagentic status --who   # the workers may be gone",
+        })
+    changed = []
+    for sk in skills(conn):
+        src = sk.get("source")
+        if not (src and sk.get("digest")):
+            continue
+        f = Path(src)
+        if f.is_file():
+            now_digest = hashlib.sha256(
+                f.read_text(encoding="utf-8").encode()).hexdigest()[:16]
+            if now_digest != sk["digest"]:
+                changed.append(sk["name"])
+    if changed:
+        attention.append({
+            "what": f"{len(changed)} skill(s) changed since registration",
+            "detail": ", ".join(changed),
+            "do": "superagentic skill-check",
+        })
+    unregistered = [s["name"] for s in skills(conn) if s.get("unregistered")]
+    if unregistered:
+        attention.append({
+            "what": f"{len(unregistered)} skill(s) required but never registered",
+            "detail": ", ".join(unregistered),
+            "do": "superagentic skill <name> --source FILE",
+        })
+
+    # The single next thing. Ordered by what actually blocks progress.
+    if not prog:
+        nxt = ("superagentic init && superagentic apply"
+               if not conn.execute("SELECT count(*) FROM kind").fetchone()[0]
+               else "superagentic add <kind> --from-file units.txt --run <run>")
+    elif live:
+        r = live[0]
+        nxt = (f"superagentic wait --run {r['run_id']}"
+               f"   # {r['left']:,} unit(s) left")
+    elif totals[FAILED]:
+        nxt = "superagentic retry --all   # after fixing the cause"
+    else:
+        nxt = "superagentic results <kind> --jsonl --flat   # everything is done"
+
+    return {
+        "now": now,
+        "runs": rs,
+        "live": [r["run_id"] for r in live],
+        "totals": totals | {"all": sum(totals.values()), "ungrouped": ungrouped},
+        "kinds": sorted(prog),
+        "skills": [s["name"] for s in skills(conn)],
+        "attention": attention,
+        "next": nxt,
+    }

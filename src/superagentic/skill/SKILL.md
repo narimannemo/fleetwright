@@ -27,6 +27,22 @@ units.
 **Do not use it** for one agent, for two units, or when each step depends on
 the last. A plain loop is clearer and the setup is not free.
 
+## First, in any session: find out where things are
+
+You have no memory of previous sessions. Before deciding anything, run:
+
+```bash
+superagentic state
+```
+
+It finds the database even if you do not know its name, and tells you which
+runs exist, which are still going, what failed, and the single next command.
+If it says there is no database here, this project has not used superagentic
+and you are starting fresh.
+
+**If a run is still going, do not start a second one over the same work.** Join
+it: spawn workers against the same database and they will claim what is left.
+
 ## The whole flow
 
 ### 1. Set up the queue (you, once)

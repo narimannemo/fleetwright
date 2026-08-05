@@ -380,6 +380,85 @@ def _cmd_release(a: argparse.Namespace) -> int:
     return 1
 
 
+def _find_db(explicit: str) -> Path | None:
+    """The database a fresh session should look at.
+
+    A new arrival does not know a work.db exists, let alone what it is called.
+    If the default is not there, look for one: a superagentic database is
+    recognisable by its tables, so this cannot pick up someone else's SQLite
+    file by accident.
+    """
+    p = Path(explicit)
+    if p.exists():
+        return p
+    if explicit != "work.db":
+        return None
+    import sqlite3 as _s
+    for cand in sorted(Path().glob("*.db")):
+        try:
+            with _s.connect(f"file:{cand}?mode=ro", uri=True) as c:
+                names = {r[0] for r in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+            if {"unit", "kind"} <= names:
+                return cand
+        except Exception:  # noqa: BLE001 - an unreadable file is simply not it
+            continue
+    return None
+
+
+def _cmd_state(a: argparse.Namespace) -> int:
+    db = _find_db(a.db)
+    if db is None:
+        print(f"no superagentic database here (looked for {a.db} and *.db)")
+        print()
+        print("If this project has never used it:")
+        print("  superagentic install-skill   # then just ask Claude in English")
+        print("  superagentic init            # or set the work up yourself")
+        return 0
+    conn = leases.connect(db)
+    st = leases.state(conn)
+    if a.json:
+        print(json.dumps(st, indent=2, ensure_ascii=False))
+        return 0
+
+    t = st["totals"]
+    print(f"superagentic {__version__} · {db}")
+    print(f"  {t['all']:,} units: {t[leases.DONE]:,} done, {t[leases.FAILED]:,} "
+          f"failed, {t[leases.OPEN]:,} waiting, {t[leases.LEASED]:,} in flight"
+          + (f", {t[leases.CANCELLED]:,} cancelled" if t[leases.CANCELLED] else ""))
+    if st["kinds"]:
+        print(f"  kinds: {', '.join(st['kinds'])}")
+    if st["skills"]:
+        print(f"  skills: {', '.join(st['skills'])}")
+
+    if st["runs"]:
+        print("\nRUNS")
+        for r in st["runs"][:6]:
+            mark = "*" if r["running"] else " "
+            el = r["elapsed"]
+            el_s = "" if el is None else (f"{el:.0f}s" if el < 90 else f"{el/60:.0f}m")
+            print(f" {mark}{r['run_id']:<22}{(r['label'] or '')[:28]:<30}"
+                  f"{r['done']:>5}/{r['units']:<6}"
+                  + (f"{r['failed']} failed  " if r["failed"] else "          ")
+                  + el_s)
+        if st["live"]:
+            print("  * still running", file=sys.stderr)
+    if st["totals"]["ungrouped"]:
+        print(f"  {st['totals']['ungrouped']:,} unit(s) belong to no run "
+              "(enqueued without --run)")
+
+    if st["attention"]:
+        print("\nNEEDS ATTENTION")
+        for item in st["attention"]:
+            print(f"  {item['what']}")
+            if item.get("detail"):
+                print(f"    {item['detail'][:90]}")
+            print(f"    -> {item['do']}")
+
+    print(f"\nNEXT\n  {st['next']}")
+    return 0
+
+
 def _cmd_status(a: argparse.Namespace) -> int:
     conn = _conn(a)
     prog = leases.progress(conn, a.kind, run=a.run)
@@ -664,6 +743,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note")
     s.add_argument("--worker")
     s.set_defaults(fn=_cmd_release)
+
+    s = common(sub.add_parser(
+        "state", help="where this project is, for a session that just arrived"))
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=_cmd_state)
 
     s = common(sub.add_parser("status", help="what is left, who holds what"))
     s.add_argument("kind", nargs="?")
