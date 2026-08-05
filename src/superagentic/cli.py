@@ -178,13 +178,31 @@ def _cmd_prompt(a: argparse.Namespace) -> int:
 
 
 def _cmd_results(a: argparse.Namespace) -> int:
-    rows = leases.results(_conn(a), a.kind, run=a.run)
-    if a.json:
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-        return 0
-    for r in rows:
-        print(f"{r['name']}\t{json.dumps(r['result'], ensure_ascii=False)}")
-    print(f"{len(rows)} finished", file=sys.stderr)
+    status = tuple(a.status) if a.status else (leases.DONE,)
+    rows = leases.iter_results(_conn(a), a.kind, run=a.run, status=status,
+                               flat=a.flat)
+    n = 0
+    if a.jsonl:
+        # Streamed and flushed per line, so this can be piped into something
+        # that starts working before the fleet has finished.
+        for r in rows:
+            print(json.dumps(r, ensure_ascii=False), flush=True)
+            n += 1
+    elif a.json:
+        # Assembled by hand rather than json.dumps(list(...)) so the whole
+        # corpus never has to be in memory at once.
+        print("[")
+        for r in rows:
+            print(("  " if n == 0 else ",\n  ")
+                  + json.dumps(r, ensure_ascii=False), end="")
+            n += 1
+        print("\n]" if n else "]")
+    else:
+        for r in rows:
+            payload = r if a.flat else r.get("result")
+            print(f"{r['name']}\t{json.dumps(payload, ensure_ascii=False)}")
+            n += 1
+    print(f"{n} row(s)", file=sys.stderr)
     return 0
 
 
@@ -526,6 +544,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("kind", nargs="?")
     s.add_argument("--run", help="only this run")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--jsonl", action="store_true",
+                   help="one object per line, streamed; for jq and for pipes")
+    s.add_argument("--flat", action="store_true",
+                   help="lift the result's keys to the top level, so `jq .claims` "
+                        "works instead of `jq .result.claims`")
+    s.add_argument("--status", action="append", choices=list(leases.STATUSES),
+                   help="default done; repeat to include failed too")
     s.set_defaults(fn=_cmd_results)
 
     s = common(sub.add_parser("add", help="enqueue units of work"))

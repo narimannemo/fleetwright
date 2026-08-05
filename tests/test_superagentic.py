@@ -1935,3 +1935,97 @@ meta = { path = "scans/$name" }
         monkeypatch.chdir(tmp_path)
         assert cli_main(["apply", "--db", str(tmp_path / "w.db")]) == 2
         assert "init" in capsys.readouterr().err
+
+
+class TestResultsOutput:
+    """Results were a single JSON blob with everything nested under `.result`.
+    That is fine for six units and useless for four hundred thousand."""
+
+    def _one(self, conn, result, name="u"):
+        sa.add(conn, "k", [name])
+        u = [x for x in sa.claim(conn, "k", worker="w", n=9, model="m")
+             if x.name == name][0]
+        sa.finish(conn, u.unit_id, worker="w", result=result, cost=0.5,
+                  tokens_in=10, tokens_out=20)
+        return u
+
+    def test_rows_carry_what_you_cannot_reconstruct_later(self, conn):
+        self._one(conn, {"claims": 3})
+        r = next(sa.iter_results(conn, "k"))
+        for k in ("model", "worker", "cost", "tokens_in", "seconds", "attempts",
+                  "run", "status"):
+            assert k in r, k
+
+    def test_flat_lifts_result_keys_to_the_top(self, conn):
+        self._one(conn, {"claims": 3, "notes": "x"})
+        r = next(sa.iter_results(conn, "k", flat=True))
+        assert r["claims"] == 3 and "result" not in r
+
+    def test_the_envelope_wins_a_collision_and_nothing_is_lost(self, conn):
+        # A row whose `name` silently became something the worker returned is a
+        # row you cannot join on.
+        self._one(conn, {"name": "the worker's idea", "claims": 1},
+                  name="real-name")
+        r = next(sa.iter_results(conn, "k", flat=True))
+        assert r["name"] == "real-name"
+        assert r["result_name"] == "the worker's idea"
+
+    def test_a_non_dict_result_survives_flattening(self, conn):
+        self._one(conn, "just a sentence")
+        r = next(sa.iter_results(conn, "k", flat=True))
+        assert r["result"] == "just a sentence"
+
+    def test_a_unit_with_no_result_is_none_not_missing(self, conn):
+        sa.add(conn, "k", ["u"])
+        u = sa.claim(conn, "k", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        assert next(sa.iter_results(conn, "k"))["result"] is None
+
+    def test_it_streams_rather_than_materialising(self, conn):
+        # A finished corpus can be hundreds of thousands of units, and
+        # building a list to print it is the difference between a command that
+        # works and one that gets killed.
+        import types
+        sa.add(conn, "k", ["a"])
+        assert isinstance(sa.iter_results(conn, "k"), types.GeneratorType)
+
+    def test_failures_can_be_included(self, conn):
+        from superagentic import leases
+        sa.add(conn, "k", ["bad"])
+        for _ in range(3):
+            u = sa.claim(conn, "k", worker="w")[0]
+            sa.fail(conn, u.unit_id, worker="w", note="no text layer")
+        assert list(sa.iter_results(conn, "k")) == []
+        rows = list(sa.iter_results(conn, "k", status=(leases.DONE, leases.FAILED)))
+        assert len(rows) == 1 and rows[0]["note"] == "no text layer"
+
+    def test_jsonl_is_one_object_per_line(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "k", "a", "b", "--db", db])
+        conn = sa.connect(db)
+        for i, u in enumerate(sa.claim(conn, "k", worker="w", n=2)):
+            sa.finish(conn, u.unit_id, worker="w", result={"n": i})
+        capsys.readouterr()
+        cli_main(["results", "k", "--db", db, "--jsonl"])
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert len(lines) == 2
+        assert all(json.loads(ln)["kind"] == "k" for ln in lines)
+
+    def test_json_is_still_one_valid_document(self, tmp_path, capsys):
+        # It is assembled by hand to avoid materialising the corpus, which is
+        # exactly the sort of thing that ships a trailing comma.
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "k", "a", "b", "c", "--db", db])
+        conn = sa.connect(db)
+        for u in sa.claim(conn, "k", worker="w", n=3):
+            sa.finish(conn, u.unit_id, worker="w", result={"n": 1})
+        capsys.readouterr()
+        cli_main(["results", "k", "--db", db, "--json"])
+        assert len(json.loads(capsys.readouterr().out)) == 3
+
+    def test_json_on_an_empty_result_set_is_still_valid(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "k", "a", "--db", db])
+        capsys.readouterr()
+        cli_main(["results", "k", "--db", db, "--json"])
+        assert json.loads(capsys.readouterr().out) == []

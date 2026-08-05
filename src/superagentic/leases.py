@@ -702,22 +702,62 @@ def leased(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def iter_results(conn: sqlite3.Connection, kind: str | None = None, *,
+                 run: str | None = None, status: str | tuple[str, ...] = DONE,
+                 flat: bool = False):
+    """Stream what the fleet produced, one row at a time.
+
+    A generator rather than a list because a finished corpus can be hundreds of
+    thousands of units, and materialising all of them to print them is the
+    difference between a command that works and one that gets killed.
+
+    Each row carries what you would want when analysing the output and cannot
+    reconstruct later: which model produced it, which worker, what it cost, how
+    long it took, and how many attempts it needed.
+    """
+    want = (status,) if isinstance(status, str) else tuple(status)
+    clauses = [f"status IN ({','.join('?' * len(want))})"]
+    args: list = list(want)
+    for col, val in (("kind", kind), ("run_id", run)):
+        if val:
+            clauses.append(f"{col} = ?")
+            args.append(val)
+    q = ("SELECT * FROM unit WHERE " + " AND ".join(clauses)
+         + " ORDER BY updated_at")
+    for r in conn.execute(q, args):
+        result = json.loads(r["result"]) if r["result"] else None
+        row = {
+            "kind": r["kind"], "name": r["name"], "unit_id": r["unit_id"],
+            "run": r["run_id"], "status": r["status"],
+            "worker": r["worker"], "model": r["model"],
+            "attempts": r["attempts"], "note": r["note"],
+            "cost": r["cost"], "tokens_in": r["tokens_in"],
+            "tokens_out": r["tokens_out"],
+            "seconds": ((r["updated_at"] - r["claimed_at"])
+                        if r["claimed_at"] and r["updated_at"] else None),
+            "finished_at": r["updated_at"],
+        }
+        if not flat:
+            yield {**row, "result": result}
+            continue
+        # Flat: the result's own keys come up to the top level, so `jq .claims`
+        # works instead of `jq .result.claims`. The envelope always wins a
+        # collision, because a row whose `name` silently became something the
+        # worker returned is a row you cannot join on. The shadowed value is
+        # kept rather than dropped.
+        merged = dict(result) if isinstance(result, dict) else {}
+        shadowed = {f"result_{k}": merged[k] for k in merged if k in row}
+        merged.update(row)
+        merged.update(shadowed)
+        if result is not None and not isinstance(result, dict):
+            merged["result"] = result
+        yield merged
+
+
 def results(conn: sqlite3.Connection, kind: str | None = None, *,
             run: str | None = None) -> list[dict]:
-    """What the fleet produced, for the orchestrator that spawned it.
-
-    Only finished units, in the order they finished. `result` is decoded; a
-    worker that finished without handing anything back has `None`, which is
-    different from having handed back nothing.
-    """
-    q = ("SELECT kind, name, unit_id, result, note, updated_at FROM unit "
-         "WHERE status = ?" + (" AND kind = ?" if kind else "")
-         + (" AND run_id = ?" if run else "") + " ORDER BY updated_at")
-    args = tuple(x for x in (DONE, kind, run) if x is not None)
-    return [{"kind": r["kind"], "name": r["name"], "unit_id": r["unit_id"],
-             "result": json.loads(r["result"]) if r["result"] else None,
-             "note": r["note"], "finished_at": r["updated_at"]}
-            for r in conn.execute(q, args)]
+    """Every finished unit's output, as a list. See `iter_results` to stream."""
+    return list(iter_results(conn, kind, run=run))
 
 
 def failures(conn: sqlite3.Connection) -> list[sqlite3.Row]:

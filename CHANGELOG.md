@@ -5,6 +5,33 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.15.0] — 2026-08-05
+
+### Added
+
+- **`results --jsonl` streams**, one object per line. A finished corpus can be
+  hundreds of thousands of units, and building a list in memory to print it is
+  the difference between a command that works and one that gets killed. It also
+  lets a consumer start before the fleet has finished.
+- **`results --flat`** lifts the result's own keys to the top level, so
+  `jq .claims` works instead of `jq .result.claims`. On a collision the
+  **envelope wins**, because a row whose `name` silently became something the
+  worker returned is a row you cannot join on; the shadowed value is kept as
+  `result_<key>` rather than dropped, and a non-object result stays under
+  `result`.
+- **Rows now carry what you cannot reconstruct later**: model, worker, cost,
+  tokens, duration, attempts, run and status, not just the payload.
+- **`results --status`**, repeatable, so failures and their notes can be read
+  alongside the successes instead of through a separate command.
+- `leases.iter_results()` as the streaming API; `results()` stays as the list.
+
+### Fixed
+
+- `results --json` no longer materialises the whole corpus to print it. It is
+  assembled a row at a time, and there are tests for the empty case and for the
+  document still parsing, because hand-assembled JSON is exactly the sort of
+  thing that ships a trailing comma.
+
 ## [0.14.0] — 2026-08-05
 
 ### Added
