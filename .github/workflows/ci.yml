@@ -30,7 +30,22 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv pip install --system ".[dev]"
       - run: ruff check .
-      - run: pytest -q
+      # Not `run: pytest -q`. Workflow LOGS need a token to read, so a
+      # failure on a runner you do not have is "Process completed with exit
+      # code 1" and nothing else. Annotations are public. Emitting the tail of
+      # the output as one turns a guessing game into a bug report.
+      - name: pytest
+        shell: bash
+        run: |
+          set +e
+          pytest -q --tb=short > pytest.out 2>&1
+          code=$?
+          cat pytest.out
+          if [ $code -ne 0 ]; then
+            msg=$(tail -60 pytest.out | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=pytest failed on ${{ matrix.os }} py${{ matrix.python }}::$msg"
+          fi
+          exit $code
       - run: superagentic demo
       - name: the dashboard renders and is self-contained
         shell: bash
