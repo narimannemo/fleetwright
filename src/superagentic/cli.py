@@ -638,6 +638,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not open a browser")
     s.set_defaults(fn=_cmd_dashboard)
 
+    s = sub.add_parser(
+        "install-skill",
+        help="teach Claude Code to run fleets: writes .claude/skills/superagentic")
+    s.add_argument("--user", action="store_true",
+                   help="install for every project on this machine")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=_cmd_install_skill)
+
     s = sub.add_parser("demo", help="a four-worker fleet, in sixty seconds")
     s.set_defaults(fn=_cmd_demo)
     return p
@@ -650,3 +658,29 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _cmd_install_skill(a: argparse.Namespace) -> int:
+    """Write the skill where Claude Code will find it.
+
+    This is the whole on-ramp. Before it, using superagentic meant reading the
+    docs and running five commands in the right order. After it, you install
+    the tool, run this once, and then ask Claude in English to process a list
+    of things with eight agents: the skill tells it how, and it does the rest.
+    """
+    from . import skill_text
+    dest = (Path.home() if a.user else Path.cwd()) / ".claude" / "skills" / "superagentic"
+    target = dest / "SKILL.md"
+    if target.exists() and not a.force:
+        print(f"{target} already exists (use --force to overwrite)", file=sys.stderr)
+        return 1
+    dest.mkdir(parents=True, exist_ok=True)
+    target.write_text(skill_text(), encoding="utf-8")
+    where = "for every project on this machine" if a.user else "for this project"
+    print(f"installed {where}: {target}")
+    print()
+    print("Now ask Claude something like:")
+    print('  "extract every claim from the 400 files in scans/, using 8 agents"')
+    print("It will define the work, enqueue it, spawn the workers, and collect")
+    print("the results. `superagentic status --who` shows the fleet while it runs.")
+    return 0

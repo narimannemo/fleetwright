@@ -23,6 +23,7 @@ superagentic retry [NAME...]   put failed units back, attempts reset
 superagentic cancel [NAME...]  stop work that has not started
 superagentic reclaim           return expired leases now
 superagentic serve             the MCP server, on stdio
+superagentic install-skill     teach Claude Code to run fleets
 superagentic demo              a fleet, a crash, a recovery
 ```
 
@@ -297,6 +298,21 @@ superagentic serve --db work.db
 ```
 
 See [MCP](mcp.md).
+
+### `install-skill`
+
+```bash
+superagentic install-skill          # this project: .claude/skills/superagentic/
+superagentic install-skill --user   # every project on this machine
+```
+
+Writes the bundled skill where Claude Code will find it. After that you ask in
+English, and Claude defines the work, enqueues it, spawns the workers **in one
+message so they run at once**, waits, and checks the database rather than the
+agents' own reports.
+
+The skill ships inside the wheel at `superagentic/skill/SKILL.md`, so there is
+exactly one copy and it cannot drift from the CLI it documents.
 
 ### `demo`
 

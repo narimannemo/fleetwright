@@ -5,40 +5,32 @@ enqueue the units, spawn workers with a generic prompt, collect the results.
 
 ## Installing it
 
-For one project:
-
 ```bash
-mkdir -p .claude/skills
-cp -r "$(python -c 'import superagentic,pathlib;print(pathlib.Path(superagentic.__file__).parent)')/../../skills/superagentic" .claude/skills/
+superagentic install-skill          # this project, into .claude/skills/
+superagentic install-skill --user   # every project on this machine
 ```
 
-Or, from a clone:
+Then ask Claude in English: *"audit the 300 files in claims/ with 6 agents"*.
+The skill tells it to define the work, enqueue it, spawn the workers in one
+message, wait, and check the database rather than the agents' own reports.
 
-```bash
-cp -r skills/superagentic /path/to/your/project/.claude/skills/
-```
+## One copy, inside the package
 
-For every project on this machine:
-
-```bash
-mkdir -p ~/.claude/skills
-cp -r skills/superagentic ~/.claude/skills/
-```
-
-Then `/superagentic` in Claude Code, or just describe the task — the
-`description` in the frontmatter is written so the skill is offered when
-someone is about to spawn several agents over a list.
+The skill lives at `src/superagentic/skill/SKILL.md` and ships inside the
+wheel, which is how `install-skill` can write it at runtime. It is deliberately
+**not** duplicated here: a second copy is a copy that drifts from the CLI it
+documents, and this project has already been bitten by that more than once.
 
 ## Why the skill and the tool descriptions both exist
 
 They are read by different agents at different moments.
 
-The **skill** is read by the agent doing the orchestrating, *before* any work
-exists — it is about setting a fleet up, and it is the only place the worker
-prompt template lives.
+The **skill** is read by the orchestrator, before any work exists. It is about
+setting a fleet up, and it is the only place that says to spawn workers in one
+message rather than several.
 
 The **MCP tool descriptions** are read by each worker, at the moment it calls
-something, with no other context. They cannot assume the skill was ever loaded.
+something, with no other context and no guarantee the skill was ever loaded.
 
 Some duplication between them is deliberate. A worker that never saw the skill
 still has to be told to stop when the queue is empty.

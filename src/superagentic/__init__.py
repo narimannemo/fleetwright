@@ -62,7 +62,19 @@ from .leases import (
     worker_prompt,
 )
 
-__version__ = "0.12.0"
+
+def skill_text() -> str:
+    """The Claude Code skill, as text. One copy, shipped inside the package.
+
+    `superagentic install-skill` writes this into a project. Keeping it here
+    rather than beside the source means it travels in the wheel and cannot
+    drift from the CLI it documents.
+    """
+    from pathlib import Path
+    return (Path(__file__).parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
+
+
+__version__ = "0.13.0"
 
 __all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
@@ -71,4 +83,4 @@ __all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "outstanding", "register_skill", "resolve_skills", "results", "retry",
            "run", "runs",
            "skills", "spec", "start_run", "this_worker",
-           "shape", "unit_id", "units", "worker_prompt"]
+           "shape", "skill_text", "unit_id", "units", "worker_prompt"]

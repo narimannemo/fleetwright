@@ -595,6 +595,19 @@ class TestMCP:
         assert r["error"]["code"] == -32601, "no reaching non-tool attributes"
 
 
+def commands_named_in(text: str) -> set[str]:
+    """Commands a document actually invokes, not sentences about the product.
+
+    `superagentic (\w+)` also matches prose: "superagentic is the shared list"
+    yields `is`, and "superagentic exists to prevent" yields `exists`. Only a
+    line that starts with the command, or one written in backticks, is an
+    invocation.
+    """
+    import re
+    return (set(re.findall(r"^\s*superagentic ([\w-]+)", text, re.M))
+            | set(re.findall(r"`superagentic ([\w-]+)", text)))
+
+
 class TestDocs:
     def test_every_readme_link_resolves(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -617,19 +630,19 @@ class TestDocs:
         that does not exist."""
         from superagentic.cli import build_parser
         real = set(build_parser()._subparsers._group_actions[0].choices)
-        text = (ROOT / "skills" / "superagentic" / "SKILL.md").read_text(encoding="utf-8")
-        used = set(re.findall(r"superagentic (\w+)", text)) - {"serve"}
+        text = (ROOT / "src" / "superagentic" / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        used = commands_named_in(text) - {"serve"}
         assert not used - real, f"skill uses commands that do not exist: {sorted(used - real)}"
 
     def test_the_skill_names_every_mcp_tool_correctly(self):
         from superagentic.mcp import _tools
         real = {t["name"] for t in _tools()}
-        text = (ROOT / "skills" / "superagentic" / "SKILL.md").read_text(encoding="utf-8")
+        text = (ROOT / "src" / "superagentic" / "skill" / "SKILL.md").read_text(encoding="utf-8")
         named = set(re.findall(r"`(\w+_(?:job|jobs|kind|results|status))`", text))
         assert not named - real, f"skill names tools that do not exist: {sorted(named - real)}"
 
     def test_the_skill_has_the_frontmatter_that_makes_it_loadable(self):
-        text = (ROOT / "skills" / "superagentic" / "SKILL.md").read_text(encoding="utf-8")
+        text = (ROOT / "src" / "superagentic" / "skill" / "SKILL.md").read_text(encoding="utf-8")
         assert text.startswith("---\n"), "no frontmatter; the skill will not load"
         fm = text.split("---", 2)[1]
         assert re.search(r"^name: superagentic$", fm, re.M)
@@ -1283,7 +1296,7 @@ class TestReadmeIsTrue:
         named = set(re.findall(
             r"`(\w+_(?:run|runs|skill|skills|kind|jobs|job|prompt|results|status))`", r))
         assert not named - real, sorted(named - real)
-        cmds = set(re.findall(r"superagentic (\w+)", r))
+        cmds = commands_named_in(r)
         realc = set(build_parser()._subparsers._group_actions[0].choices)
         # "as" comes from "install superagentic ... as a library".
         assert not cmds - realc - {"as"}, sorted(cmds - realc - {"as"})
@@ -1712,3 +1725,56 @@ class TestStatusShowsEverything:
         # And the row must account for every unit.
         nums = [int(x) for x in out.splitlines()[1].split()[1:-1]]
         assert sum(nums) == 3, f"row does not add up: {nums}"
+
+
+class TestInstallSkill:
+    """The on-ramp. Before it, using this meant reading docs and running five
+    commands in order; after it, two commands and a sentence in English."""
+
+    def test_it_writes_where_claude_code_looks(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        assert cli_main(["install-skill"]) == 0
+        target = tmp_path / ".claude" / "skills" / "superagentic" / "SKILL.md"
+        assert target.exists()
+        assert target.read_text(encoding="utf-8").startswith("---\nname: superagentic")
+
+    def test_it_refuses_to_clobber_without_force(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        cli_main(["install-skill"])
+        target = tmp_path / ".claude" / "skills" / "superagentic" / "SKILL.md"
+        target.write_text("mine, edited", encoding="utf-8")
+        assert cli_main(["install-skill"]) == 1
+        assert target.read_text(encoding="utf-8") == "mine, edited"
+        assert cli_main(["install-skill", "--force"]) == 0
+        assert target.read_text(encoding="utf-8") != "mine, edited"
+
+    def test_the_skill_is_readable_from_the_installed_package(self):
+        # It must live inside the wheel, or install-skill cannot write it for
+        # anyone who installed from PyPI rather than from a clone.
+        import superagentic
+        text = superagentic.skill_text()
+        assert "spawn" in text.lower() and len(text) > 2000
+
+    def test_there_is_exactly_one_copy_of_the_skill(self):
+        """A second copy is a copy that drifts from the CLI it documents, and
+        this project has been bitten by duplication more than once."""
+        found = [p for p in ROOT.rglob("SKILL.md")
+                 if ".venv" not in p.parts and "dist" not in p.parts
+                 and ".claude" not in p.parts]
+        assert len(found) == 1, [str(p.relative_to(ROOT)) for p in found]
+
+    def test_the_skill_tells_claude_to_spawn_in_one_message(self):
+        # Spawning in separate messages makes the fleet a fleet of one, and it
+        # is the single easiest mistake for an orchestrator to make.
+        import superagentic
+        t = superagentic.skill_text()
+        assert "ONE message" in t
+        assert "separate messages" in t
+
+    def test_the_skill_only_names_real_commands(self):
+
+        import superagentic
+        from superagentic.cli import build_parser
+        real = set(build_parser()._subparsers._group_actions[0].choices)
+        used = commands_named_in(superagentic.skill_text())
+        assert not used - real - {"serve"}, sorted(used - real - {"serve"})

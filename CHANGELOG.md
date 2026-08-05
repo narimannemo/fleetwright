@@ -5,6 +5,39 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.13.0] — 2026-08-05
+
+### Added
+
+- **`superagentic install-skill`.** The whole on-ramp is now two commands:
+
+  ```bash
+  uv tool install superagentic
+  superagentic install-skill
+  ```
+
+  Then you ask Claude in English, and it defines the work, enqueues the units,
+  spawns the workers in one message, waits, and checks the database. Before
+  this, using superagentic meant reading the docs and running five commands in
+  the right order, which is a first-five-minutes problem and first five minutes
+  decide adoption.
+
+### Changed
+
+- **The README leads with what actually happens to people**: you ask Claude to
+  process 400 pages, it spawns eight subagents, and all eight start on page
+  one. The old opening described the mechanism before the reader had a reason
+  to care about it.
+- **The skill is rewritten around spawning subagents.** It now says explicitly
+  to spawn them in ONE message, since spawning in several makes the fleet a
+  fleet of one, and that is the easiest mistake an orchestrator can make.
+- **One copy of the skill, inside the package** at
+  `superagentic/skill/SKILL.md`, shipped in the wheel so `install-skill` works
+  for anyone who installed from PyPI. The duplicate under `skills/` is gone: a
+  second copy is a copy that drifts from the CLI it documents, and this project
+  has been bitten by duplication more than once. A test asserts there is
+  exactly one.
+
 ## [0.12.0] — 2026-08-05
 
 The three that turn a fleet from hand-driven into scriptable. All three were

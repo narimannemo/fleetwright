@@ -6,32 +6,49 @@
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
 
-**Spawn ten agents on one job and they all start on page one. Then each one
-invents its own idea of what "done" means.**
+**You ask Claude to extract every claim from 400 scanned pages. It spawns
+eight subagents. All eight start on page one.**
 
-Both failures have the same cause. A freshly spawned agent has no context: it
-did not read your orchestration code, it cannot see the other nine, and it will
-not remember any of this next session. So it needs two things it can only get
-by asking.
+And each one decides for itself what "done" means, so you get eight standards
+on one corpus.
 
-1. **Which unit is mine?** Nobody else is on it, and if I die it comes back.
+Both failures have the same cause. A subagent has no context: it cannot see the
+other seven, and it did not read the reasoning you did before spawning it. So
+it needs two things it can only get by asking.
+
+1. **Which page is mine?** Nobody else is on it, and if I die it comes back.
 2. **What am I supposed to do with it?** The task, what finished looks like,
-   what to hand back, and which skills I need before I start.
+   what to hand back, and which skills I need first.
 
-SuperAgentic is where both of those live. The orchestrator defines the work and
-enqueues the units. Every worker claims one and is handed the assignment with
-it. Nothing collides, nothing guesses, and afterwards you can see what actually
-happened.
+SuperAgentic is where both live. You define the work once and enqueue the
+units; every worker claims one and is handed the assignment with it. Nothing
+collides, nothing guesses, and afterwards you can see what actually happened.
 
 A library, a CLI, an MCP server and a dashboard, in one SQLite file, with **no
 dependencies at all**.
 
+## Start here
+
 ```bash
-uv tool install superagentic                      # the CLI, on your PATH
-uvx superagentic demo                             # or run it without installing
-uv pip install superagentic                       # or as a library
-brew install narimannemo/tap/superagentic         # or via Homebrew
+uv tool install superagentic
+superagentic install-skill
 ```
+
+That writes a skill into `.claude/skills/`. Now ask Claude in English:
+
+> extract every claim from the 400 files in `scans/`, using 8 agents
+
+Claude reads the skill and does the rest: defines the work, enqueues the units,
+spawns the workers **in one message so they run at once**, waits for them, and
+collects the results. You watch it with:
+
+```bash
+superagentic status --who      # who is holding what, right now
+superagentic dashboard         # or the whole picture in a browser
+```
+
+If you would rather drive it yourself, everything below is what the skill is
+doing on your behalf.
 
 ## The shape of it
 
@@ -242,7 +259,7 @@ reliably find something, and what it finds is usually a unit somebody else has.
 | [MCP](docs/mcp.md) | wiring it to Claude Code, Cursor, or your own agent |
 | [Dashboard](docs/dashboard.md) | what each panel answers, and why percentiles not averages |
 | [Reference](docs/reference.md) | every command and the Python API |
-| [Skill](skills/README.md) | a drop in Claude Code skill, so an agent knows how to run a fleet |
+| [Skill](skills/README.md) | the Claude Code skill, and how `install-skill` works |
 | [Packaging](packaging/README.md) | uv, Homebrew, pip, and which to use |
 | [Licensing](LICENSING.md) | Apache-2.0 everywhere except `ee/`, and where the line is |
 
