@@ -1578,3 +1578,137 @@ class TestShapeChecking:
         assert "STILL YOURS" in bad["message"]
         ok = s.finish_job({"unit_id": u["unit_id"], "result": {"claims": 1}})
         assert ok["finished"] is True
+
+
+class TestWaitRetryCancel:
+    """The three that turn a fleet from hand-driven into scriptable."""
+
+    def test_wait_exits_zero_when_everything_finished(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "k", "a", "b", "--db", db])
+        conn = sa.connect(db)
+        for u in sa.claim(conn, "k", worker="w", n=2):
+            sa.finish(conn, u.unit_id, worker="w")
+        assert cli_main(["wait", "--db", db, "--quiet", "--interval", "0.01"]) == 0
+
+    def test_wait_exits_one_if_anything_failed(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "k", "a", "--db", db])
+        conn = sa.connect(db)
+        for _ in range(3):
+            u = sa.claim(conn, "k", worker="w")[0]
+            sa.fail(conn, u.unit_id, worker="w", note="no")
+        assert cli_main(["wait", "--db", db, "--quiet", "--interval", "0.01"]) == 1
+
+    def test_wait_exits_two_on_timeout(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "k", "a", "--db", db])       # never worked on
+        assert cli_main(["wait", "--db", db, "--quiet", "--timeout", "0.05",
+                         "--interval", "0.01"]) == 2
+
+    def test_wait_on_an_empty_database_returns_rather_than_hanging(self, tmp_path):
+        assert cli_main(["wait", "--db", str(tmp_path / "e.db"), "--quiet",
+                         "--interval", "0.01"]) == 0
+
+    def test_wait_is_scoped_by_run(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["start", "--db", db, "--id", "R1"])
+        cli_main(["start", "--db", db, "--id", "R2"])
+        cli_main(["add", "k", "a", "--db", db, "--run", "R1"])
+        cli_main(["add", "k", "b", "--db", db, "--run", "R2"])
+        conn = sa.connect(db)
+        u = sa.claim(conn, "k", worker="w", run="R1")[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        # R1 is done even though R2 has never started.
+        assert cli_main(["wait", "--db", db, "--run", "R1", "--quiet",
+                         "--interval", "0.01"]) == 0
+
+    def test_retry_resets_attempts_to_zero_not_up_by_one(self, conn):
+        # The unit failed under the old code. Carrying its history forward
+        # would retire it again after a single try, which is exactly wrong
+        # when the thing that changed is the fix.
+        sa.add(conn, "k", ["bad"])
+        for _ in range(3):
+            u = sa.claim(conn, "k", worker="w")[0]
+            sa.fail(conn, u.unit_id, worker="w", note="old bug")
+        assert sa.claim(conn, "k", worker="w") == []
+        assert sa.retry(conn, kind="k")["retrying"] == 1
+        got = sa.claim(conn, "k", worker="w")
+        assert got and got[0].attempts == 1
+        # and the reason it failed before is still readable
+        assert conn.execute("SELECT note FROM unit").fetchone()["note"] == "old bug"
+
+    def test_retry_without_a_scope_is_refused(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        assert cli_main(["retry", "--db", db]) == 2
+        assert "refusing" in capsys.readouterr().err
+
+    def test_cancel_leaves_in_flight_work_alone_by_default(self, conn):
+        sa.add(conn, "k", ["a", "b", "c"])
+        held = sa.claim(conn, "k", worker="w")[0]
+        assert sa.cancel(conn, kind="k")["cancelled"] == 2
+        # The one being worked on survives, and can still be finished.
+        assert sa.finish(conn, held.unit_id, worker="w") is True
+        assert sa.progress(conn)["k"][sa.CANCELLED] == 2
+
+    def test_cancel_now_takes_back_what_is_in_flight(self, conn):
+        sa.add(conn, "k", ["a"])
+        held = sa.claim(conn, "k", worker="w")[0]
+        assert sa.cancel(conn, kind="k", now=True)["cancelled"] == 1
+        # The worker finds out the way it finds out about any lost lease.
+        assert sa.finish(conn, held.unit_id, worker="w") is False
+
+    def test_a_cancelled_unit_is_never_handed_out_again(self, conn):
+        sa.add(conn, "k", ["a"])
+        sa.cancel(conn, kind="k")
+        assert sa.claim(conn, "k", worker="w") == []
+
+    def test_cancel_is_a_status_not_a_deletion(self, conn):
+        # A queue that forgets what you cancelled cannot say why a run came up
+        # short three weeks later.
+        sa.add(conn, "k", ["a"])
+        sa.cancel(conn, kind="k")
+        assert conn.execute("SELECT count(*) FROM unit").fetchone()[0] == 1
+        assert sa.units(conn)["units"][0]["status"] == sa.CANCELLED
+
+    def test_cancelled_units_can_be_brought_back(self, conn):
+        sa.add(conn, "k", ["a"])
+        sa.cancel(conn, kind="k")
+        assert sa.retry(conn, kind="k")["retrying"] == 0        # not by default
+        assert sa.retry(conn, kind="k", include_cancelled=True)["retrying"] == 1
+        assert sa.claim(conn, "k", worker="w")
+
+    def test_every_status_is_counted_somewhere(self, conn):
+        """Adding a status and forgetting a consumer is how a total silently
+        stops adding up."""
+        from superagentic import leases
+        sa.add(conn, "k", ["a", "b", "c", "d"])
+        sa.cancel(conn, kind="k", names=["d"])
+        u = sa.claim(conn, "k", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        sa.claim(conn, "k", worker="w2")
+        t = leases.stats(conn)["totals"]
+        assert set(leases.STATUSES) <= set(t)
+        assert sum(t[s] for s in leases.STATUSES) == t["all"] == 4
+
+
+class TestStatusShowsEverything:
+    def test_the_status_table_prints_every_status(self, tmp_path, capsys):
+        """`cancelled` shipped invisible: the table had a hand-written list of
+        columns and the new status was not in it, so three units vanished from
+        a row that no longer added up."""
+        from superagentic import leases
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "k", "a", "b", "c", "--db", db])
+        conn = sa.connect(db)
+        sa.cancel(conn, kind="k", names=["c"])
+        u = sa.claim(conn, "k", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        capsys.readouterr()
+        cli_main(["status", "--db", db])
+        out = capsys.readouterr().out
+        for st in leases.STATUSES:
+            assert st in out, f"{st} is missing from the status table"
+        # And the row must account for every unit.
+        nums = [int(x) for x in out.splitlines()[1].split()[1:-1]]
+        assert sum(nums) == 3, f"row does not add up: {nums}"

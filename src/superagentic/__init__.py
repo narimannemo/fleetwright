@@ -23,14 +23,18 @@ deliberately does not give you — starting with exactly-once, which nothing can
 
 from . import shape
 from .leases import (
+    CANCELLED,
     DEFAULT_LEASE,
     DONE,
     FAILED,
     LEASED,
     MAX_ATTEMPTS,
     OPEN,
+    STATUSES,
+    TERMINAL,
     Unit,
     add,
+    cancel,
     claim,
     connect,
     define,
@@ -39,12 +43,14 @@ from .leases import (
     finish,
     heartbeat,
     leased,
+    outstanding,
     progress,
     reclaim,
     register_skill,
     release,
     resolve_skills,
     results,
+    retry,
     run,
     runs,
     skills,
@@ -56,11 +62,13 @@ from .leases import (
     worker_prompt,
 )
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
-__all__ = ["DEFAULT_LEASE", "DONE", "FAILED", "LEASED", "MAX_ATTEMPTS", "OPEN",
-           "Unit", "add", "claim", "connect", "define", "fail", "failures",
+__all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
+           "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
+           "Unit", "add", "cancel", "claim", "connect", "define", "fail", "failures",
            "finish", "heartbeat", "leased", "progress", "reclaim", "release",
-           "register_skill", "resolve_skills", "results", "run", "runs",
+           "outstanding", "register_skill", "resolve_skills", "results", "retry",
+           "run", "runs",
            "skills", "spec", "start_run", "this_worker",
            "shape", "unit_id", "units", "worker_prompt"]

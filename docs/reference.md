@@ -18,6 +18,9 @@ superagentic status            what is left, who holds what
 superagentic prompt [KIND]     the spawn prompt, generated from the kind
 superagentic results [KIND]    what the fleet handed back
 superagentic dashboard         a live view of the fleet, in a browser
+superagentic wait              block until done; exit 1 if anything failed
+superagentic retry [NAME...]   put failed units back, attempts reset
+superagentic cancel [NAME...]  stop work that has not started
 superagentic reclaim           return expired leases now
 superagentic serve             the MCP server, on stdio
 superagentic demo              a fleet, a crash, a recovery
@@ -235,6 +238,52 @@ status, worker, attempts, elapsed, lease remaining, and the note or result. It
 filters by status and searches name, worker and note — so a failure is findable
 by what it said. The list is bounded and **says when it truncated**, because a
 view that silently shows the first 300 of 40,000 is a view that lies.
+
+### `wait`
+
+```bash
+superagentic wait --run "$RUN" --timeout 3600
+```
+
+Blocks until nothing is open and nothing is in flight. **The exit code is the
+interface**: `0` finished cleanly, `1` something failed, `2` timed out. Without
+it every script driving a fleet wraps a polling loop around `status` and parses
+text out of it.
+
+Progress goes to stderr and only when it changes, so stdout stays clean and an
+hour-long run does not print eighteen hundred identical lines.
+
+### `retry`
+
+```bash
+superagentic retry --run "$RUN"          # every failed unit in that run
+superagentic retry p0189 p0233           # just these
+superagentic retry --all --include-cancelled
+```
+
+**Attempts go back to zero**, not up by one. The unit failed under the old
+code; carrying its history forward would retire it again after a single try,
+which is exactly wrong when the thing that changed is the fix. The note is
+kept, because why it failed last time is still worth reading.
+
+Refuses to run without a scope. Bare `retry` would reopen every failed unit in
+the file across every run, which is never what anyone means and cannot be
+undone.
+
+### `cancel`
+
+```bash
+superagentic cancel --run "$RUN"         # stop what has not started
+superagentic cancel --run "$RUN" --now   # and take back what is in flight
+```
+
+By default it cancels `open` units only and lets in-flight work finish, because
+half-finished work is still work. `--now` also takes back leased units, and the
+workers holding them find out the way they find out about any lost lease:
+`finish` returns false.
+
+**Cancelled is a status, not a deletion.** A queue that forgets what you
+cancelled cannot answer why a run came up short three weeks later.
 
 ### `reclaim`
 

@@ -195,6 +195,23 @@ wait
 superagentic status --who
 ```
 
+A script driving a fleet does not need to parse any of that. `wait` blocks
+until the work is over and the **exit code is the interface**: `0` finished
+cleanly, `1` something failed, `2` timed out.
+
+```bash
+RUN=$(superagentic start --label "nightly extraction")
+superagentic add extract --from-file pages.txt --run "$RUN"
+./spawn-my-workers.sh &
+
+if superagentic wait --run "$RUN" --timeout 7200; then
+  ./collect-results.sh
+else
+  superagentic status --run "$RUN"        # something failed, or it stalled
+  superagentic retry --run "$RUN"         # fix the bug, re-run only what broke
+fi
+```
+
 ## From an agent
 
 Fourteen MCP tools, split by who uses them.

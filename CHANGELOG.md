@@ -5,6 +5,38 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.12.0] — 2026-08-05
+
+The three that turn a fleet from hand-driven into scriptable. All three were
+obviously missing the moment superagentic was used on real work.
+
+### Added
+
+- **`wait`** blocks until nothing is open and nothing is in flight, and **the
+  exit code is the interface**: `0` clean, `1` something failed, `2` timed out.
+  Without it every script wraps a polling loop around `status` and parses text.
+  Progress goes to stderr and only when it changes.
+- **`retry`** puts failed units back with **attempts reset to zero**, not up by
+  one. The unit failed under the old code; carrying its history forward would
+  retire it again after a single try, which is exactly wrong when the thing
+  that changed is the fix. The note is kept. Refuses to run without a scope,
+  because bare `retry` would reopen every failed unit in the file and that
+  cannot be undone.
+- **`cancel`** stops work that has not started and leaves in-flight work alone,
+  because half-finished work is still work. `--now` also takes it back, and
+  those workers find out the way they find out about any lost lease.
+  **`cancelled` is a status, not a deletion**: a queue that forgets what you
+  cancelled cannot say why a run came up short three weeks later.
+- `leases.STATUSES` and `leases.TERMINAL`, so nothing enumerates statuses by
+  hand again.
+
+### Fixed
+
+- **`cancelled` shipped invisible in `status`.** The table had a hand-written
+  list of columns, so three cancelled units vanished and the row stopped adding
+  up. It is driven off `STATUSES` now, with a test asserting every status
+  appears and the row totals.
+
 ## [0.11.0] — 2026-08-05
 
 ### Added

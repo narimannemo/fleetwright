@@ -334,11 +334,15 @@ def _cmd_status(a: argparse.Namespace) -> int:
         print(json.dumps(prog, indent=2, sort_keys=True))
         return 0
     w = max(len(k) for k in prog) + 2
-    print(f"{'kind':<{w}}{'open':>8}{'leased':>8}{'done':>8}{'failed':>8}{'left':>8}")
-    for kind, s in sorted(prog.items()):
-        left = s[leases.OPEN] + s[leases.LEASED]
-        print(f"{kind:<{w}}{s[leases.OPEN]:>8,}{s[leases.LEASED]:>8,}"
-              f"{s[leases.DONE]:>8,}{s[leases.FAILED]:>8,}{left:>8,}")
+    # Driven off leases.STATUSES rather than a hand-written list of columns.
+    # A status that exists but is not printed makes the row stop adding up, and
+    # `cancelled` did exactly that the first time it shipped.
+    head = "".join(f"{st:>10}" for st in leases.STATUSES)
+    print(f"{'kind':<{w}}{head}{'left':>8}")
+    for kind, counts in sorted(prog.items()):
+        left = counts[leases.OPEN] + counts[leases.LEASED]
+        row = "".join(f"{counts[st]:>10,}" for st in leases.STATUSES)
+        print(f"{kind:<{w}}{row}{left:>8,}")
     if a.who:
         held = leases.leased(conn)
         if held:
@@ -351,6 +355,69 @@ def _cmd_status(a: argparse.Namespace) -> int:
         print(f"\n{len(bad)} units no worker could finish:")
         for r in bad[:10]:
             print(f"  {r['name']:<24}{r['note'] or ''}")
+    return 0
+
+
+def _cmd_wait(a: argparse.Namespace) -> int:
+    """Block until the work is over, and say what happened in the exit code.
+
+    Without this every script that drives a fleet wraps a polling loop around
+    `status` and parses text out of it. The exit code is the interface: 0 for
+    everything finished cleanly, 1 if anything failed, 2 on timeout. That is
+    what makes a fleet usable from a Makefile or from CI.
+    """
+    conn = _conn(a)
+    deadline = time.time() + a.timeout if a.timeout else None
+    last = None
+    while True:
+        leases.reclaim(conn)
+        open_, leased = leases.outstanding(conn, run=a.run, kind=a.kind)
+        prog = leases.progress(conn, a.kind, run=a.run)
+        done = sum(p[leases.DONE] for p in prog.values())
+        failed = sum(p[leases.FAILED] for p in prog.values())
+        line = f"{done} done, {failed} failed, {open_} waiting, {leased} in flight"
+        if not a.quiet and line != last:
+            # Only on change: a line every two seconds for an hour is not
+            # progress reporting, it is noise that hides the one line that
+            # mattered.
+            print(line, file=sys.stderr, flush=True)
+            last = line
+        if open_ == 0 and leased == 0:
+            if not prog:
+                print("nothing queued", file=sys.stderr)
+                return 0
+            if not a.quiet:
+                print("finished", file=sys.stderr)
+            return 1 if failed else 0
+        if deadline and time.time() >= deadline:
+            print(f"timed out after {a.timeout:g}s with {open_ + leased} "
+                  f"unit(s) outstanding", file=sys.stderr)
+            return 2
+        time.sleep(a.interval)
+
+
+def _cmd_retry(a: argparse.Namespace) -> int:
+    if not (a.run or a.kind or a.name or a.all):
+        # Bare `retry` would reopen every failed unit in the file, across every
+        # run. That is never what someone means and it is not undoable.
+        print("refusing to retry everything: pass --run, --kind, a name, "
+              "or --all", file=sys.stderr)
+        return 2
+    out = leases.retry(_conn(a), run=a.run, kind=a.kind, names=a.name or None,
+                       include_cancelled=a.include_cancelled)
+    print(f"{out['retrying']} unit(s) back in the queue, attempts reset")
+    return 0
+
+
+def _cmd_cancel(a: argparse.Namespace) -> int:
+    if not (a.run or a.kind or a.name or a.all):
+        print("refusing to cancel everything: pass --run, --kind, a name, "
+              "or --all", file=sys.stderr)
+        return 2
+    out = leases.cancel(_conn(a), run=a.run, kind=a.kind, names=a.name or None,
+                        now=a.now)
+    print(f"{out['cancelled']} unit(s) cancelled"
+          + ("" if a.now else "; anything in flight was left to finish"))
     return 0
 
 
@@ -522,6 +589,34 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--who", action="store_true")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=_cmd_status)
+
+    s = common(sub.add_parser(
+        "wait", help="block until the work is done; exit 1 if anything failed"))
+    s.add_argument("--run")
+    s.add_argument("--kind")
+    s.add_argument("--timeout", type=float, help="seconds; exit 2 if exceeded")
+    s.add_argument("--interval", type=float, default=2.0)
+    s.add_argument("--quiet", action="store_true")
+    s.set_defaults(fn=_cmd_wait)
+
+    s = common(sub.add_parser(
+        "retry", help="put failed units back in the queue, attempts reset"))
+    s.add_argument("name", nargs="*")
+    s.add_argument("--run")
+    s.add_argument("--kind")
+    s.add_argument("--all", action="store_true", help="every failed unit")
+    s.add_argument("--include-cancelled", action="store_true")
+    s.set_defaults(fn=_cmd_retry)
+
+    s = common(sub.add_parser(
+        "cancel", help="stop work that has not started"))
+    s.add_argument("name", nargs="*")
+    s.add_argument("--run")
+    s.add_argument("--kind")
+    s.add_argument("--all", action="store_true")
+    s.add_argument("--now", action="store_true",
+                   help="also take back units already in flight")
+    s.set_defaults(fn=_cmd_cancel)
 
     s = common(sub.add_parser("reclaim", help="return expired leases now"))
     s.set_defaults(fn=_cmd_reclaim)

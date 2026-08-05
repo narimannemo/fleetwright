@@ -78,6 +78,7 @@ PAGE = """<!doctype html>
   --line:#e3e7ee; --line2:#d3d9e4;
   --accent:#55618c;
   --done:#27754b; --leased:#2a5fa8; --open:#98a2b3; --failed:#b3282f;
+  --cancelled:#c7ccd6;
   --failed-bg:#fdf2f2; --warn-bg:#fdf8ee; --warn:#8a6416;
   /* Brand, not state. Kept in its own three tokens so nothing here can drift
      into meaning "good" or "critical". */
@@ -90,6 +91,7 @@ PAGE = """<!doctype html>
     --line:#242c39; --line2:#313b4b;
     --accent:#8f9cd0;
     --done:#4ec97a; --leased:#6ba9ff; --open:#69748a; --failed:#ff7b72;
+  --cancelled:#3a4351;
     --failed-bg:#2a1618; --warn-bg:#2a2318; --warn:#d7b45e;
   --wm-ink:#0b1a2b; --wm-red:#ff3b32; --wm-cream:#f6e6c4;
   }
@@ -100,6 +102,7 @@ PAGE = """<!doctype html>
   --line:#242c39; --line2:#313b4b;
   --accent:#8f9cd0;
   --done:#4ec97a; --leased:#6ba9ff; --open:#69748a; --failed:#ff7b72;
+  --cancelled:#3a4351;
   --failed-bg:#2a1618; --warn-bg:#2a2318; --warn:#d7b45e;
   --wm-ink:#0b1a2b; --wm-red:#ff3b32; --wm-cream:#f6e6c4;
 }
@@ -109,6 +112,8 @@ PAGE = """<!doctype html>
   --line:#e3e7ee; --line2:#d3d9e4;
   --accent:#55618c;
   --done:#27754b; --leased:#2a5fa8; --open:#98a2b3; --failed:#b3282f;
+  --cancelled:#c7ccd6;
+  --cancelled:#c7ccd6;
   --failed-bg:#fdf2f2; --warn-bg:#fdf8ee; --warn:#8a6416;
   --wm-ink:#0b1a2b; --wm-red:#ef2b23; --wm-cream:#fbeecd;
 }
@@ -214,6 +219,8 @@ aside { background:var(--surface); border-right:1px solid var(--line);
 .pill.failed { background:var(--failed); color:#fff; }
 .pill.leased { background:var(--leased); color:#fff; }
 .pill.open   { background:var(--line2);  color:var(--ink2); }
+.pill.cancelled { background:transparent; color:var(--ink3);
+                  border-color:var(--line2); }
 .body { min-width:0; }
 @media (max-width:1080px) { .shell { grid-template-columns:180px 210px minmax(0,1fr); } }
 @media (max-width:860px) {
@@ -737,7 +744,7 @@ function render(d) {
   }
 
   // -- per kind
-  const order = ["done", "leased", "open", "failed"];
+  const order = ["done", "leased", "open", "failed", "cancelled"];
   $("#kinds").innerHTML = Object.entries(d.by_kind).map(([k, c]) => {
     const tot = order.reduce((a, s) => a + c[s], 0) || 1;
     return `<div style="margin-bottom:14px">

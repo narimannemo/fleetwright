@@ -63,6 +63,16 @@ DEFAULT_LEASE = 900.0
 MAX_ATTEMPTS = 3
 
 OPEN, LEASED, DONE, FAILED = "open", "leased", "done", "failed"
+#: Terminal, like done and failed, and deliberately NOT a deletion. A queue
+#: that forgets what you cancelled cannot tell you later why a run is short.
+CANCELLED = "cancelled"
+
+#: Every status, in the order a person reads them. Consumers that enumerate
+#: statuses must use this rather than a literal tuple, which is how adding one
+#: silently breaks a total somewhere.
+STATUSES = (OPEN, LEASED, DONE, FAILED, CANCELLED)
+#: The ones that mean "no more work will happen here".
+TERMINAL = (DONE, FAILED, CANCELLED)
 
 SCHEMA = """
 -- What a kind of work IS, as opposed to which units of it are outstanding.
@@ -662,7 +672,7 @@ def progress(conn: sqlite3.Connection, kind: str | None = None, *,
          + "GROUP BY kind, status")
     out: dict[str, dict[str, int]] = {}
     for r in conn.execute(q, args):
-        out.setdefault(r["kind"], {OPEN: 0, LEASED: 0, DONE: 0, FAILED: 0})
+        out.setdefault(r["kind"], dict.fromkeys(STATUSES, 0))
         out[r["kind"]][r["status"]] = r["n"]
     return out
 
@@ -726,7 +736,7 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
     per_worker: dict[str, dict] = {}
     per_model: dict[str, dict] = {}
     for r in rows:
-        k = by_kind.setdefault(r["kind"], {OPEN: 0, LEASED: 0, DONE: 0, FAILED: 0})
+        k = by_kind.setdefault(r["kind"], dict.fromkeys(STATUSES, 0))
         k[r["status"]] += 1
         if r["status"] == DONE:
             done_times.append(r["updated_at"] or now)
@@ -746,8 +756,7 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
             if r["claimed_at"] and r["status"] == DONE:
                 w["seconds"] += max(0.0, (r["updated_at"] or now) - r["claimed_at"])
 
-    totals = {s: sum(k[s] for k in by_kind.values())
-              for s in (OPEN, LEASED, DONE, FAILED)}
+    totals = {s: sum(k[s] for k in by_kind.values()) for s in STATUSES}
     left = totals[OPEN] + totals[LEASED]
 
     # Percentiles, not a mean. One unit that hung for an hour drags a mean
@@ -1082,3 +1091,83 @@ def resolve_skills(conn: sqlite3.Connection, names) -> list[dict]:
                                       "version": None, "digest": None,
                                       "unregistered": True})
     return out
+
+
+def cancel(conn: sqlite3.Connection, *, run: str | None = None,
+           kind: str | None = None, names: list[str] | None = None,
+           now: bool = False) -> dict:
+    """Stop work that has not started, and optionally take back what has.
+
+    By default this cancels only `open` units and leaves whatever is in flight
+    to finish. That is almost always what someone wants: the fleet is running
+    the wrong thing, and half-finished work is still work. `now=True` also
+    takes back leased units, and the workers holding them discover it the way
+    they discover any lost lease, because `finish` returns False.
+
+    Cancelled is a status, not a deletion. A queue that forgets what you
+    cancelled cannot answer why a run came up short three weeks later.
+    """
+    where, args = ["status IN (?, ?)" if now else "status = ?"], []
+    args += [OPEN, LEASED] if now else [OPEN]
+    for col, val in (("run_id", run), ("kind", kind)):
+        if val:
+            where.append(f"{col} = ?")
+            args.append(val)
+    if names:
+        where.append(f"name IN ({','.join('?' * len(names))})")
+        args += list(names)
+    cur = conn.execute(
+        f"UPDATE unit SET status=?, worker=NULL, leased_until=NULL, "
+        f"lease_token=NULL, note=COALESCE(note, 'cancelled'), updated_at=? "
+        f"WHERE {' AND '.join(where)}",
+        [CANCELLED, time.time(), *args])
+    conn.commit()
+    return {"cancelled": cur.rowcount}
+
+
+def retry(conn: sqlite3.Connection, *, run: str | None = None,
+          kind: str | None = None, names: list[str] | None = None,
+          include_cancelled: bool = False) -> dict:
+    """Put failed units back in the queue, with their attempts reset.
+
+    The normal shape of a day: a run finishes, three units failed, you find the
+    bug, and you want to re-run those three and nothing else. Without this the
+    only route is editing SQLite by hand, because `attempts` is already at the
+    limit and `claim` will never offer them again.
+
+    Attempts go back to zero rather than up by one. The unit failed under the
+    old code; carrying its history forward would retire it again after one
+    more try, which is precisely wrong when the thing that changed is the fix.
+    The note is kept, because why it failed last time is still worth reading.
+    """
+    statuses = [FAILED, CANCELLED] if include_cancelled else [FAILED]
+    where = [f"status IN ({','.join('?' * len(statuses))})"]
+    args: list = list(statuses)
+    for col, val in (("run_id", run), ("kind", kind)):
+        if val:
+            where.append(f"{col} = ?")
+            args.append(val)
+    if names:
+        where.append(f"name IN ({','.join('?' * len(names))})")
+        args += list(names)
+    cur = conn.execute(
+        f"UPDATE unit SET status=?, attempts=0, worker=NULL, leased_until=NULL, "
+        f"lease_token=NULL, updated_at=? WHERE {' AND '.join(where)}",
+        [OPEN, time.time(), *args])
+    conn.commit()
+    return {"retrying": cur.rowcount}
+
+
+def outstanding(conn: sqlite3.Connection, *, run: str | None = None,
+                kind: str | None = None) -> tuple[int, int]:
+    """(not started, in flight). A run is over when both are zero."""
+    where, args = [], []
+    for col, val in (("run_id", run), ("kind", kind)):
+        if val:
+            where.append(f"{col} = ?")
+            args.append(val)
+    clause = (" AND " + " AND ".join(where)) if where else ""
+    row = conn.execute(
+        f"SELECT sum(status = ?) AS o, sum(status = ?) AS l FROM unit "
+        f"WHERE 1=1{clause}", [OPEN, LEASED, *args]).fetchone()
+    return (row["o"] or 0), (row["l"] or 0)
