@@ -170,6 +170,15 @@ CREATE TABLE IF NOT EXISTS unit (
     -- under one version and half under another, and only a record taken at
     -- claim time can tell them apart.
     skills_used TEXT,
+    -- What the unit cost, as the worker reports it. DECLARED, NOT MEASURED:
+    -- nothing here can observe a model's token usage, and pretending
+    -- otherwise would make these numbers evidence when they are testimony.
+    -- They are stored because they are the only thing you cannot reconstruct
+    -- afterwards, and because "did the cheaper model do these worse" is the
+    -- question a fleet operator actually has.
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    cost REAL,
     -- What the worker says it is: "claude-opus-5", "gpt-5.4", "a bash script".
     -- Declared, never detected -- nothing here can verify it, and pretending
     -- otherwise would make it evidence when it is only a label. It earns its
@@ -318,7 +327,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     for table, cols in (("unit", (("claimed_at", "REAL"), ("result", "TEXT"),
                                   ("run_id", "TEXT"), ("model", "TEXT"),
-                                  ("skills_used", "TEXT"))),
+                                  ("skills_used", "TEXT"), ("tokens_in", "INTEGER"),
+                                  ("tokens_out", "INTEGER"), ("cost", "REAL"))),
                         ("kind", (("skills", "TEXT"), ("mcp", "TEXT"),
                                   ("context", "TEXT")))):
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -577,7 +587,9 @@ def _close(conn: sqlite3.Connection, unit_id: str, status: str, *,
 
 def finish(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
            note: str | None = None, result: Any = None,
-           then: dict[str, list[str]] | None = None) -> bool:
+           then: dict[str, list[str]] | None = None,
+           tokens_in: int | None = None, tokens_out: int | None = None,
+           cost: float | None = None) -> bool:
     """Mark a unit done, hand back a result, and optionally enqueue what follows.
 
     `False` means the lease was not yours to close — this worker was slow, it
@@ -600,6 +612,11 @@ def finish(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
     cannot inject work off the back of a unit it no longer owns.
     """
     ok = _close(conn, unit_id, DONE, worker=worker, note=note, result=result)
+    if ok and any(v is not None for v in (tokens_in, tokens_out, cost)):
+        conn.execute(
+            "UPDATE unit SET tokens_in = ?, tokens_out = ?, cost = ? "
+            "WHERE unit_id = ?", (tokens_in, tokens_out, cost, unit_id))
+        conn.commit()
     if ok and then:
         for kind, names in then.items():
             if names:
@@ -743,11 +760,19 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
             if r["claimed_at"]:
                 durations.append(max(0.0, (r["updated_at"] or now) - r["claimed_at"]))
         if r["model"] and r["status"] in (DONE, FAILED):
-            m = per_model.setdefault(r["model"], {"model": r["model"], "done": 0,
-                                                  "failed": 0, "seconds": 0.0})
+            m = per_model.setdefault(r["model"], {
+                "model": r["model"], "done": 0, "failed": 0, "seconds": 0.0,
+                "tokens_in": 0, "tokens_out": 0, "cost": 0.0, "priced": 0})
             m["done" if r["status"] == DONE else "failed"] += 1
             if r["claimed_at"] and r["status"] == DONE:
                 m["seconds"] += max(0.0, (r["updated_at"] or now) - r["claimed_at"])
+            m["tokens_in"] += r["tokens_in"] or 0
+            m["tokens_out"] += r["tokens_out"] or 0
+            if r["cost"] is not None:
+                m["cost"] += r["cost"]
+                # Counted separately so a per-unit average is over the units
+                # that actually reported, not over everything.
+                m["priced"] += 1
         if r["worker"] and r["status"] in (DONE, FAILED):
             w = per_worker.setdefault(r["worker"], {"worker": r["worker"],
                                                     "done": 0, "failed": 0,
@@ -803,6 +828,15 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
                       "attempts": r["attempts"]}
                      for r in rows if r["status"] == FAILED],
         "retried": sum(1 for r in rows if r["attempts"] > 1),
+        "cost": {
+            "total": sum(r["cost"] or 0.0 for r in rows),
+            "tokens_in": sum(r["tokens_in"] or 0 for r in rows),
+            "tokens_out": sum(r["tokens_out"] or 0 for r in rows),
+            # How much of the run reported at all. A total over 3 of 400 units
+            # is a number that will be quoted as if it were the run's cost.
+            "priced": sum(1 for r in rows if r["cost"] is not None),
+            "units": len(rows),
+        },
         "units_per_min": round(per_sec * 60, 1),
         "eta_seconds": round(left / per_sec) if per_sec and left else None,
     }
@@ -931,7 +965,10 @@ def runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
                count(DISTINCT CASE WHEN u.status IN ('done','failed')
                                    THEN u.worker END) AS workers,
                sum(CASE WHEN u.status = 'done' AND u.claimed_at IS NOT NULL
-                        THEN u.updated_at - u.claimed_at END) AS busy
+                        THEN u.updated_at - u.claimed_at END) AS busy,
+               sum(u.cost) AS cost, sum(u.tokens_in) AS tin,
+               sum(u.tokens_out) AS tout,
+               sum(u.cost IS NOT NULL) AS priced
           FROM run r LEFT JOIN unit u ON u.run_id = r.run_id
          GROUP BY r.run_id ORDER BY r.started_at DESC LIMIT ?""", (limit,))
     out = []
@@ -953,6 +990,10 @@ def runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
             # parallelism you really got, which is the number that tells you
             # whether more workers would have helped.
             "busy": r["busy"] or 0.0,
+            "cost": r["cost"] or 0.0,
+            "tokens_in": r["tin"] or 0,
+            "tokens_out": r["tout"] or 0,
+            "priced": r["priced"] or 0,
         })
     return out
 
@@ -1006,7 +1047,8 @@ def units(conn: sqlite3.Connection, *, run: str | None = None,
         "units": [{
             "unit_id": r["unit_id"], "kind": r["kind"], "name": r["name"],
             "run_id": r["run_id"], "status": r["status"], "worker": r["worker"],
-            "model": r["model"],
+            "model": r["model"], "cost": r["cost"],
+            "tokens_in": r["tokens_in"], "tokens_out": r["tokens_out"],
             "attempts": r["attempts"], "note": r["note"],
             "result": json.loads(r["result"]) if r["result"] else None,
             "updated_at": r["updated_at"],

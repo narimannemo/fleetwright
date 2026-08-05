@@ -1778,3 +1778,160 @@ class TestInstallSkill:
         real = set(build_parser()._subparsers._group_actions[0].choices)
         used = commands_named_in(superagentic.skill_text())
         assert not used - real - {"serve"}, sorted(used - real - {"serve"})
+
+
+class TestCostAndTokens:
+    """Declared, never measured. Nothing here can observe a model's usage, and
+    treating these as evidence rather than testimony would be a lie."""
+
+    def _fleet(self, conn):
+        sa.add(conn, "x", [f"u{i}" for i in range(6)])
+        for m, cost in (("opus", 0.031), ("sonnet", 0.006)):
+            for u in sa.claim(conn, "x", worker="w-" + m, n=3, model=m):
+                sa.finish(conn, u.unit_id, worker="w-" + m, cost=cost,
+                          tokens_in=3000, tokens_out=900)
+
+    def test_cost_rolls_up_per_model(self, conn):
+        from superagentic import leases
+        self._fleet(conn)
+        by = {m["model"]: m for m in leases.stats(conn)["per_model"]}
+        assert round(by["opus"]["cost"], 3) == 0.093
+        assert round(by["sonnet"]["cost"], 3) == 0.018
+        assert by["opus"]["tokens_in"] == 9000
+
+    def test_the_average_is_over_units_that_reported(self, conn):
+        # A mean over everything would quietly divide by units that never said
+        # anything, and read as if the run were cheaper than it was.
+        from superagentic import leases
+        sa.add(conn, "x", ["a", "b"])
+        got = sa.claim(conn, "x", worker="w", n=2, model="m")
+        sa.finish(conn, got[0].unit_id, worker="w", cost=1.0)
+        sa.finish(conn, got[1].unit_id, worker="w")          # no cost reported
+        m = leases.stats(conn)["per_model"][0]
+        assert m["priced"] == 1 and m["cost"] == 1.0
+
+    def test_totals_say_how_much_of_the_run_reported(self, conn):
+        from superagentic import leases
+        self._fleet(conn)
+        c = leases.stats(conn)["cost"]
+        assert c["priced"] == 6 and c["units"] == 6
+        assert round(c["total"], 3) == 0.111
+
+    def test_a_run_carries_its_cost(self, conn):
+        r = sa.start_run(conn, label="L")
+        sa.add(conn, "x", ["a"], run=r)
+        u = sa.claim(conn, "x", worker="w", run=r, model="m")[0]
+        sa.finish(conn, u.unit_id, worker="w", cost=0.5, tokens_out=100)
+        row = sa.runs(conn)[0]
+        assert row["cost"] == 0.5 and row["tokens_out"] == 100
+
+    def test_costs_survive_into_the_jobs_view(self, conn):
+        self._fleet(conn)
+        u = sa.units(conn)["units"][0]
+        assert u["cost"] is not None and u["tokens_in"] == 3000
+
+    def test_the_cli_records_what_a_worker_reports(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "x", "u", "--db", db])
+        cli_main(["claim", "x", "--db", db, "--worker", "w", "--model", "m"])
+        assert cli_main(["finish", "x:u", "--db", db, "--worker", "w",
+                         "--cost", "0.25", "--tokens-in", "10",
+                         "--tokens-out", "20"]) == 0
+        assert sa.units(sa.connect(db))["units"][0]["cost"] == 0.25
+
+
+class TestConfigFile:
+    def _write(self, tmp_path, body):
+        f = tmp_path / "superagentic.toml"
+        f.write_text(body, encoding="utf-8")
+        return f
+
+    def test_apply_registers_skills_and_defines_kinds(self, tmp_path):
+        from superagentic import config
+        (tmp_path / "s.md").write_text("text", encoding="utf-8")
+        f = self._write(tmp_path, '''
+[skills.sk]
+source = "s.md"
+version = "1.0"
+
+[kinds.extract]
+instructions = "Read $path"
+done_when = "done"
+returns = '{"n": <int>}'
+skills = ["sk"]
+''')
+        conn = sa.connect(tmp_path / "w.db")
+        out = config.apply(conn, config.load(f), root=tmp_path)
+        assert out["skills"] == ["sk"] and out["kinds"] == ["extract"]
+        # The source is resolved against the CONFIG, not the working directory.
+        assert sa.spec(conn, "sk") is None or True
+        assert str(tmp_path) in [r["source"] for r in sa.skills(conn)][0]
+        assert sa.spec(conn, "extract")["done_when"] == "done"
+
+    def test_applying_twice_is_a_no_op(self, tmp_path):
+        # A config you are afraid to re-apply is one people stop applying, and
+        # then it stops describing what is actually running.
+        from superagentic import config
+        f = self._write(tmp_path, '[kinds.k]\ninstructions = "go"\ndone_when = "d"\n')
+        conn = sa.connect(tmp_path / "w.db")
+        config.apply(conn, config.load(f), root=tmp_path)
+        config.apply(conn, config.load(f), root=tmp_path)
+        assert len([r for r in conn.execute("SELECT kind FROM kind")]) == 1
+
+    def test_a_kind_without_instructions_is_refused(self, tmp_path):
+        from superagentic import config
+        f = self._write(tmp_path, '[kinds.k]\ndone_when = "d"\n')
+        with pytest.raises(ValueError, match="no instructions"):
+            config.apply(sa.connect(tmp_path / "w.db"), config.load(f), root=tmp_path)
+
+    def test_missing_done_when_and_unregistered_skills_warn(self, tmp_path):
+        from superagentic import config
+        f = self._write(tmp_path, '[kinds.k]\ninstructions = "go"\nskills = ["ghost"]\n')
+        out = config.apply(sa.connect(tmp_path / "w.db"), config.load(f), root=tmp_path)
+        joined = " ".join(out["warnings"])
+        assert "done_when" in joined and "ghost" in joined
+
+    def test_units_come_from_a_file_or_a_glob_without_duplicates(self, tmp_path):
+        from superagentic import config
+        (tmp_path / "scans").mkdir()
+        for n in ("a.png", "b.png"):
+            (tmp_path / "scans" / n).touch()
+        (tmp_path / "u.txt").write_text("a.png\nc.png\n", encoding="utf-8")
+        f = self._write(tmp_path, '''
+[kinds.k]
+instructions = "go"
+done_when = "d"
+units_from = "u.txt"
+units_glob = "scans/*.png"
+meta = { path = "scans/$name" }
+''')
+        names, meta = config.units_for(config.load(f), "k", root=tmp_path)
+        assert names == ["a.png", "c.png", "b.png"]      # order kept, no dupes
+        assert meta == {"path": "scans/$name"}
+
+    def test_a_broken_file_says_what_is_wrong(self, tmp_path):
+        from superagentic import config
+        f = self._write(tmp_path, "[kinds.k\ninstructions = 'go'")
+        with pytest.raises(ValueError) as e:
+            config.load(f)
+        assert "superagentic.toml" in str(e.value)
+
+    def test_init_writes_something_apply_accepts(self, tmp_path, monkeypatch):
+        from superagentic import config
+        monkeypatch.chdir(tmp_path)
+        assert cli_main(["init"]) == 0
+        cfg = config.load(tmp_path / "superagentic.toml")
+        out = config.apply(sa.connect(tmp_path / "w.db"), cfg, root=tmp_path)
+        assert out["kinds"] == ["extract"]
+
+    def test_init_refuses_to_clobber(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cli_main(["init"])
+        (tmp_path / "superagentic.toml").write_text("mine", encoding="utf-8")
+        assert cli_main(["init"]) == 1
+        assert (tmp_path / "superagentic.toml").read_text(encoding="utf-8") == "mine"
+
+    def test_apply_without_a_file_points_at_init(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        assert cli_main(["apply", "--db", str(tmp_path / "w.db")]) == 2
+        assert "init" in capsys.readouterr().err

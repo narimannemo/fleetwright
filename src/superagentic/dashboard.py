@@ -691,6 +691,15 @@ function render(d) {
          d.retried ? d.retried + " retried" : "none retried",
          t.failed ? "var(--failed)" : null),
     tile("Throughput", d.units_per_min ? d.units_per_min + "/min" : "—", "recent rate"),
+    tile("Cost", d.cost && d.cost.priced
+           ? (d.cost.total < 10 ? "$" + d.cost.total.toFixed(3)
+                                : "$" + d.cost.total.toFixed(2))
+           : "—",
+         d.cost && d.cost.priced
+           ? (d.cost.priced < d.cost.units
+               ? `${d.cost.priced} of ${d.cost.units} reported`
+               : `${((d.cost.tokens_in + d.cost.tokens_out) / 1000).toFixed(0)}k tokens`)
+           : "nothing reported"),
     tile("ETA", d.eta_seconds == null ? (t.left ? "—" : "done") : dur(d.eta_seconds),
          d.duration.p50 == null ? "no timings yet"
            : `p50 ${dur(d.duration.p50)} · p95 ${dur(d.duration.p95)}`),
@@ -811,6 +820,22 @@ function render(d) {
        <span class="mono">--skill</span>, and
        <span class="mono">superagentic skill &lt;name&gt; --source FILE</span>
        says what the name means.</div>`;
+
+  const pm = d.per_model || [];
+  if (pm.length) {
+    $("#workers").insertAdjacentHTML("beforeend", `<table style="margin-top:14px"><tr>
+        <th>model</th><th class="num">done</th><th class="num">failed</th>
+        <th class="num">mean</th><th class="num">cost</th>
+        <th class="num">per unit</th><th class="num">tokens</th></tr>
+      ${pm.map(m => `<tr><td class="mono">${esc(m.model)}</td>
+        <td class="num">${m.done}</td>
+        <td class="num" ${m.failed ? 'style="color:var(--failed)"' : ""}>${m.failed}</td>
+        <td class="num muted">${dur(m.done ? m.seconds / m.done : null)}</td>
+        <td class="num">${m.priced ? "$" + m.cost.toFixed(3) : "—"}</td>
+        <td class="num muted">${m.priced ? "$" + (m.cost / m.priced).toFixed(4) : "—"}</td>
+        <td class="num muted">${((m.tokens_in + m.tokens_out) / 1000).toFixed(0)}k</td>
+        </tr>`).join("")}</table>`);
+  }
 
   $("#failures").innerHTML = d.failures.length ? `<table><tr>
       <th style="width:3px"></th><th>unit</th><th class="num">tries</th>

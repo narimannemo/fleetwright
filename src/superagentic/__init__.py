@@ -21,7 +21,7 @@ all, because nothing can tell a busy worker from a dead one. See
 deliberately does not give you — starting with exactly-once, which nothing can.
 """
 
-from . import shape
+from . import config, shape
 from .leases import (
     CANCELLED,
     DEFAULT_LEASE,
@@ -74,7 +74,7 @@ def skill_text() -> str:
     return (Path(__file__).parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 __all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
@@ -83,4 +83,4 @@ __all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "outstanding", "register_skill", "resolve_skills", "results", "retry",
            "run", "runs",
            "skills", "spec", "start_run", "this_worker",
-           "shape", "skill_text", "unit_id", "units", "worker_prompt"]
+           "config", "shape", "skill_text", "unit_id", "units", "worker_prompt"]

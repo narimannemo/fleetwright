@@ -204,6 +204,13 @@ def _tools() -> list[dict]:
                                 "then": {"type": "object", "description":
                                          "Follow-on work: {kind: [names]}. Use "
                                          "it to hand the next stage its units."},
+                                "tokens_in": {"type": "integer", "description":
+                                              "input tokens you used, if you know"},
+                                "tokens_out": {"type": "integer"},
+                                "cost": {"type": "number", "description":
+                                         "what this unit cost. Reported, never "
+                                         "checked, and the only way anyone can "
+                                         "later compare one model against another."},
                                 "note": {"type": "string"}}},
         },
         {
@@ -384,7 +391,8 @@ class Server:
                                    "the shape and call finish_job again."}
         ok = leases.finish(self.conn, a["unit_id"], worker=self.worker,
                            note=a.get("note"), result=a.get("result"),
-                           then=a.get("then"))
+                           then=a.get("then"), tokens_in=a.get("tokens_in"),
+                           tokens_out=a.get("tokens_out"), cost=a.get("cost"))
         return {"finished": True} if ok else {
             "finished": False,
             "reason": "the lease expired and another worker holds this unit — "

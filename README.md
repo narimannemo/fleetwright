@@ -48,7 +48,13 @@ superagentic dashboard         # or the whole picture in a browser
 ```
 
 If you would rather drive it yourself, everything below is what the skill is
-doing on your behalf.
+doing on your behalf. And if you run the same work often, put it in a file
+instead of a shell history:
+
+```bash
+superagentic init      # writes a commented superagentic.toml
+superagentic apply     # registers the skills, defines the kinds, enqueues
+```
 
 ## The shape of it
 
@@ -179,7 +185,7 @@ Every panel exists to separate those two situations:
 | Throughput | is it still moving |
 | In flight | **is anyone stuck**, since anything held past 3x the p95 is marked |
 | Jobs | what happened to this one unit |
-| Workers and models | did one model do these faster, or worse |
+| Workers and models | did one model do these faster, cheaper, or worse |
 | Skills in use | which version of which skill, and what nobody registered |
 | Could not finish | what needs a human |
 

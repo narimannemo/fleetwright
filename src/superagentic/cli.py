@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, leases, shape
+from . import __version__, config, leases, shape
 
 
 def _conn(a: argparse.Namespace):
@@ -299,8 +299,9 @@ def _cmd_done(a: argparse.Namespace) -> int:
             print("  the unit is still yours. Fix the shape and finish again, "
                   "or pass --no-check.", file=sys.stderr)
             raise SystemExit(2)
-    if leases.finish(_conn(a), a.unit_id, worker=a.worker, note=a.note,
-                     result=result):
+    if leases.finish(conn, a.unit_id, worker=a.worker, note=a.note,
+                     result=result, tokens_in=a.tokens_in,
+                     tokens_out=a.tokens_out, cost=a.cost):
         print(f"done {a.unit_id}")
         return 0
     print(f"not yours — {a.unit_id}'s lease expired and another worker holds it",
@@ -569,6 +570,12 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--worker")
         s.add_argument("--no-check", action="store_true",
                        help="skip the check against the kind's declared returns")
+        # Declared, not measured. Nothing here can observe a model's usage.
+        s.add_argument("--tokens-in", type=int, metavar="N")
+        s.add_argument("--tokens-out", type=int, metavar="N")
+        s.add_argument("--cost", type=float, metavar="X",
+                       help="what this unit cost you, in whatever currency you "
+                            "are counting; recorded as reported")
         s.set_defaults(fn=_cmd_done)
 
     s = common(sub.add_parser("fail", help="report a unit that could not be done"))
@@ -638,6 +645,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not open a browser")
     s.set_defaults(fn=_cmd_dashboard)
 
+    s = sub.add_parser("init", help="write a starter superagentic.toml")
+    s.add_argument("--file", default="superagentic.toml")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=_cmd_init)
+
+    s = common(sub.add_parser(
+        "apply", help="register skills and define kinds from a config file"))
+    s.add_argument("--file", default="superagentic.toml")
+    s.add_argument("--run", help="enqueue declared units into this run")
+    s.add_argument("--no-units", action="store_true",
+                   help="apply skills and kinds only")
+    s.set_defaults(fn=_cmd_apply)
+
     s = sub.add_parser(
         "install-skill",
         help="teach Claude Code to run fleets: writes .claude/skills/superagentic")
@@ -658,6 +678,47 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _cmd_init(a: argparse.Namespace) -> int:
+    f = Path(a.file)
+    if f.exists() and not a.force:
+        print(f"{f} already exists (use --force to overwrite)", file=sys.stderr)
+        return 1
+    f.write_text(config.EXAMPLE, encoding="utf-8")
+    print(f"wrote {f}")
+    print("  edit it, then: superagentic apply")
+    return 0
+
+
+def _cmd_apply(a: argparse.Namespace) -> int:
+    f = Path(a.file)
+    try:
+        cfg = config.load(f)
+    except (FileNotFoundError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        if isinstance(e, FileNotFoundError):
+            print("  `superagentic init` writes a starter one.", file=sys.stderr)
+        return 2
+    conn = _conn(a)
+    try:
+        out = config.apply(conn, cfg, root=f.parent)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(f"{len(out['skills'])} skill(s), {len(out['kinds'])} kind(s) applied")
+    for k in out["kinds"]:
+        names, meta = config.units_for(cfg, k, root=f.parent)
+        if not names:
+            continue
+        if a.no_units:
+            print(f"  {k}: {len(names)} unit(s) declared, not enqueued (--no-units)")
+            continue
+        n = leases.add(conn, k, names, meta=meta or None, run=a.run)
+        print(f"  {k}: {n:,} new unit(s) of {len(names):,} declared")
+    for w in out["warnings"]:
+        print(f"  warning: {w}", file=sys.stderr)
+    return 0
 
 
 def _cmd_install_skill(a: argparse.Namespace) -> int:

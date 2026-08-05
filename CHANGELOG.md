@@ -5,6 +5,40 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.14.0] — 2026-08-05
+
+### Added
+
+- **Cost and tokens per unit.** `finish --cost 0.031 --tokens-in 3100
+  --tokens-out 900`, and the same on `finish_job` over MCP. Rolled up per
+  model, per kind and per run, with a Cost tile and a per-model table in the
+  dashboard.
+  **Declared, never measured**: nothing here can observe a model's usage, and
+  treating these as evidence rather than testimony would be a lie. They earn
+  their place because they are the only thing you cannot reconstruct
+  afterwards, and because *"did the cheaper model do these worse"* is the
+  question a fleet operator actually has. Same corpus, interleaved:
+
+  ```
+  claude-opus-5      127 done   $4.11   $0.0324/unit   524k tokens
+  claude-sonnet-5    113 done   $0.73   $0.0065/unit   461k tokens
+  ```
+
+  Averages are over the units that **reported**, and the totals say how many
+  did, so a figure computed from 3 of 400 units is not quoted as the run's
+  cost.
+- **`superagentic init` and `apply`, with a `superagentic.toml`.** Setting a
+  fleet up was five commands in the right order, living in whoever's shell
+  history ran them last. Now it is a file you can review, diff and commit.
+  TOML rather than YAML for one boring reason and one good one: `tomllib` is in
+  the standard library so the zero-dependency rule holds, and TOML has no
+  significant whitespace, so a prompt pasted into it cannot change meaning
+  because of an indent.
+  **Applying twice is a no-op**, because a config you are afraid to re-apply is
+  one people stop applying, and then it stops describing what is running.
+  Kinds are durable and belong in the file; units are per run and stay on the
+  command line, with `units_from` and `units_glob` as the one convenience.
+
 ## [0.13.0] — 2026-08-05
 
 ### Added

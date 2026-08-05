@@ -3,6 +3,8 @@
 ## Commands
 
 ```
+superagentic init              write a starter superagentic.toml
+superagentic apply             register skills and define kinds from it
 superagentic start              begin a run; prints its id
 superagentic runs              every run, newest first
 superagentic skill NAME        say what a skill name means
@@ -28,6 +30,43 @@ superagentic demo              a fleet, a crash, a recovery
 ```
 
 Every command except `demo` takes `--db` (default `work.db`).
+
+### `init` / `apply`
+
+```bash
+superagentic init            # writes a commented superagentic.toml
+superagentic apply --run "$RUN"
+```
+
+```toml
+[skills.house-style]
+source  = "docs/house-style.md"
+version = "1.0"
+
+[kinds.extract]
+instructions = "Read $path and record every claim it makes, quoting verbatim."
+done_when    = "every claim in the file is recorded, or you have established there are none"
+returns      = '{"claims": <int>, "notes": "<string>"}'
+skills       = ["house-style"]
+units_glob   = "scans/*.png"
+meta         = { path = "scans/$name" }
+```
+
+Setting a fleet up was five commands in the right order, living in whoever's
+shell history ran them last. This is the same thing in a file you can review,
+diff and commit.
+
+**TOML rather than YAML** for one boring reason and one good one: `tomllib` is
+in the standard library, so the zero-dependency rule holds; and TOML has no
+significant whitespace, so a prompt pasted into it cannot change meaning
+because of an indent.
+
+**Applying twice is a no-op.** Both underlying calls replace rather than
+append, so an edited file is an edit. A config you are afraid to re-apply is
+one people stop applying, and then it stops describing what is running.
+
+Kinds are durable and belong in the file. Units are per run and stay on the
+command line, except for the convenience of `units_from` and `units_glob`.
 
 ### `start` / `runs`
 
@@ -164,10 +203,18 @@ against another's. `SUPERAGENTIC_MODEL` works too.
 
 ```bash
 superagentic finish  extract:p0189          # `done` is an alias
+superagentic finish  extract:p0189 --cost 0.031 --tokens-in 3100 --tokens-out 900
 superagentic finish  extract:p0189 --result-file out.json
 superagentic fail    extract:p0189 --note "no text layer"
 superagentic release extract:p0189 --note "wrong language"
 ```
+
+`--cost`, `--tokens-in` and `--tokens-out` are **declared, never measured**:
+nothing here can observe a model's usage. They are stored because they are the
+only thing you cannot reconstruct afterwards, and because *"did the cheaper
+model do these worse"* is the question a fleet operator actually has. `stats()`
+rolls them up per model, per kind and per run, and reports how many units
+reported at all, so a total over 3 of 400 is not quoted as the run's cost.
 
 Use `--result-file` for anything large: Linux caps a single shell argument at 128 KB whatever `ARG_MAX` says.
 
