@@ -5,6 +5,43 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.16.0] — 2026-08-05
+
+Both of these come from asking what two Claude sessions sharing one database
+can do to each other. The answer was: everything, silently.
+
+### Added
+
+- **Every unit pins the definition it was claimed under.** `superagentic brief
+  <unit_id>` answers what that unit was actually told, however the kind has
+  changed since. `spec()` reports what a kind says *now*, which is precisely
+  the wrong answer when you are asking why one unit's output looks different.
+  **Content-addressed, not copied.** Storing the rendered brief on each unit is
+  O(units), and a 400,000 unit corpus would carry most of a gigabyte of
+  near-identical text. One row per distinct definition, and the brief is
+  re-derived from it plus that unit's own `meta`.
+- **`superagentic kinds`** shows every definition a kind has had and how many
+  units ran under each, with the current one marked.
+
+### Fixed
+
+- **Redefining a kind with units waiting or in flight is refused.** Two
+  sessions sharing a database and both defining `extract` clobbered each other
+  mid-run: nothing errored, and the remaining units quietly carried the other
+  session's instructions. `--force` (or `force=True`, or `force` over MCP) is
+  how you mean it, and the message says what will happen either way.
+  Applying an **unchanged** definition is always allowed, so re-applying a
+  config stays a no-op.
+
+### Notes
+
+- **One database is one trust boundary, and the only one.** There is no
+  permission model: a worker with no `--run` claims from every run, either
+  session can cancel or retry the other's work, and kinds and skills are global
+  to the file. The only thing actually protected is that a worker cannot
+  `finish` or `heartbeat` a unit it does not hold. `docs/concepts.md` now says
+  so, with a table of which arrangement to pick.
+
 ## [0.15.0] — 2026-08-05
 
 ### Added

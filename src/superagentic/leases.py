@@ -154,6 +154,22 @@ CREATE TABLE IF NOT EXISTS run (
     started_at REAL
 );
 
+-- Every definition a kind has ever had, keyed by the hash of its content.
+--
+-- Storing the rendered brief on each unit would be the obvious way to answer
+-- "what was this unit actually told", and it is O(units): a 400,000 unit
+-- corpus would carry most of a gigabyte of near-identical text. Content
+-- addressing makes it one row per DISTINCT definition instead, and the brief
+-- for any unit is re-derivable from its pinned definition plus its own meta.
+CREATE TABLE IF NOT EXISTS kind_version (
+    digest TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    done_when TEXT, returns TEXT, tools TEXT,
+    skills TEXT, mcp TEXT, context TEXT,
+    first_seen REAL
+);
+
 CREATE TABLE IF NOT EXISTS unit (
     -- kind:name, so enqueueing the same work twice is a no-op rather than a
     -- second copy. Callers re-run their enumeration all the time.
@@ -170,6 +186,10 @@ CREATE TABLE IF NOT EXISTS unit (
     -- under one version and half under another, and only a record taken at
     -- claim time can tell them apart.
     skills_used TEXT,
+    -- Which definition of its kind this unit was claimed under. Without it, a
+    -- kind redefined mid-run leaves no record of what any unit was told, and
+    -- two sessions sharing a database can clobber each other invisibly.
+    kind_digest TEXT,
     -- What the unit cost, as the worker reports it. DECLARED, NOT MEASURED:
     -- nothing here can observe a model's token usage, and pretending
     -- otherwise would make these numbers evidence when they are testimony.
@@ -328,7 +348,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for table, cols in (("unit", (("claimed_at", "REAL"), ("result", "TEXT"),
                                   ("run_id", "TEXT"), ("model", "TEXT"),
                                   ("skills_used", "TEXT"), ("tokens_in", "INTEGER"),
-                                  ("tokens_out", "INTEGER"), ("cost", "REAL"))),
+                                  ("tokens_out", "INTEGER"), ("cost", "REAL"),
+                                  ("kind_digest", "TEXT"))),
                         ("kind", (("skills", "TEXT"), ("mcp", "TEXT"),
                                   ("context", "TEXT")))):
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -382,7 +403,8 @@ def _render(text: str | None, unit_name: str, meta: dict) -> str:
 def define(conn: sqlite3.Connection, kind: str, instructions: str, *,
            done_when: str | None = None, returns: str | None = None,
            tools: str | None = None, skills: list[str] | None = None,
-           mcp: dict[str, str] | None = None, context: str | None = None) -> None:
+           mcp: dict[str, str] | None = None, context: str | None = None,
+           force: bool = False) -> str:
     """Say what this kind of work IS, once, so every worker is told the same thing.
 
     The alternative is putting the instructions in the prompt that spawns the
@@ -416,13 +438,44 @@ def define(conn: sqlite3.Connection, kind: str, instructions: str, *,
     correction reaches every worker that has not yet claimed, without
     restarting anything.
     """
+    sk = json.dumps(list(skills)) if skills else None
+    mc = json.dumps(mcp) if mcp else None
+    digest = kind_digest(kind, instructions, done_when, returns, tools, sk, mc,
+                         context)
+
+    prev = conn.execute("SELECT * FROM kind WHERE kind = ?", (kind,)).fetchone()
+    if prev is not None and not force:
+        was = kind_digest(kind, prev["instructions"], prev["done_when"],
+                          prev["returns"], prev["tools"], prev["skills"],
+                          prev["mcp"], prev["context"])
+        if was != digest:
+            open_, leased = outstanding(conn, kind=kind)
+            if open_ or leased:
+                # The most damaging operation had no guard on it. Two sessions
+                # sharing a database and both defining `extract` clobbered each
+                # other mid-run: nothing errored, and the remaining units
+                # quietly carried the other session's instructions.
+                raise ValueError(
+                    f"kind {kind!r} has {open_} waiting and {leased} in flight, "
+                    f"and this changes its definition.\n"
+                    f"  Units already claimed keep the text they were given; "
+                    f"units claimed after this would get the new text.\n"
+                    f"  Either finish or cancel them first, or pass force=True "
+                    f"if that is what you mean.")
+
+    conn.execute(
+        "INSERT OR IGNORE INTO kind_version (digest, kind, instructions, "
+        "done_when, returns, tools, skills, mcp, context, first_seen) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (digest, kind, instructions, done_when, returns, tools, sk, mc, context,
+         time.time()))
     conn.execute(
         "INSERT OR REPLACE INTO kind (kind, instructions, done_when, returns, "
         "tools, skills, mcp, context, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (kind, instructions, done_when, returns, tools,
-         json.dumps(list(skills)) if skills else None,
-         json.dumps(mcp) if mcp else None, context, time.time()))
+        (kind, instructions, done_when, returns, tools, sk, mc, context,
+         time.time()))
     conn.commit()
+    return digest
 
 
 def spec(conn: sqlite3.Connection, kind: str) -> dict | None:
@@ -531,13 +584,21 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
     # they are now — which is the question this exists to answer when someone
     # edits a skill halfway through a run.
     pinned: dict[str, list[dict]] = {}
+    digests: dict[str, str | None] = {}
     for k, sp in specs.items():
         names = json.loads(sp["skills"]) if sp and sp["skills"] else []
         pinned[k] = resolve_skills(conn, names) if names else []
+        # Pin the DEFINITION too, not only the skills. A kind redefined
+        # mid-run otherwise leaves no record of what any unit was told, which
+        # is exactly the question you have when one unit's output looks wrong.
+        digests[k] = kind_digest(
+            k, sp["instructions"], sp["done_when"], sp["returns"], sp["tools"],
+            sp["skills"], sp["mcp"], sp["context"]) if sp else None
     for r in rows:
-        if pinned.get(r["kind"]):
-            conn.execute("UPDATE unit SET skills_used = ? WHERE unit_id = ?",
-                         (json.dumps(pinned[r["kind"]]), r["unit_id"]))
+        conn.execute(
+            "UPDATE unit SET skills_used = ?, kind_digest = ? WHERE unit_id = ?",
+            (json.dumps(pinned[r["kind"]]) if pinned.get(r["kind"]) else None,
+             digests.get(r["kind"]), r["unit_id"]))
     conn.commit()
     return [_to_unit(r, specs.get(r["kind"]), pinned.get(r["kind"]) or ())
             for r in rows]
@@ -1088,6 +1149,7 @@ def units(conn: sqlite3.Connection, *, run: str | None = None,
             "unit_id": r["unit_id"], "kind": r["kind"], "name": r["name"],
             "run_id": r["run_id"], "status": r["status"], "worker": r["worker"],
             "model": r["model"], "cost": r["cost"],
+            "kind_digest": r["kind_digest"],
             "tokens_in": r["tokens_in"], "tokens_out": r["tokens_out"],
             "attempts": r["attempts"], "note": r["note"],
             "result": json.loads(r["result"]) if r["result"] else None,
@@ -1253,3 +1315,52 @@ def outstanding(conn: sqlite3.Connection, *, run: str | None = None,
         f"SELECT sum(status = ?) AS o, sum(status = ?) AS l FROM unit "
         f"WHERE 1=1{clause}", [OPEN, LEASED, *args]).fetchone()
     return (row["o"] or 0), (row["l"] or 0)
+
+
+def kind_digest(kind: str, instructions: str, done_when, returns, tools,
+                skills, mcp, context) -> str:
+    """A stable hash of everything a worker is told, so a change is detectable.
+
+    Every field that reaches the brief goes in. A definition that differs only
+    in a field nobody reads would otherwise look like a change, and one that
+    differs in a field workers DO read must never look unchanged.
+    """
+    blob = "\x00".join(str(x) for x in
+                       (kind, instructions, done_when, returns, tools, skills,
+                        mcp, context))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def kind_versions(conn: sqlite3.Connection, kind: str | None = None) -> list[dict]:
+    """Every definition a kind has had, with how many units ran under each."""
+    q = "SELECT * FROM kind_version" + (" WHERE kind = ?" if kind else "") \
+        + " ORDER BY kind, first_seen"
+    rows = [dict(r) for r in conn.execute(q, (kind,) if kind else ())]
+    used: dict[str, int] = {}
+    for (d,) in conn.execute(
+            "SELECT kind_digest FROM unit WHERE kind_digest IS NOT NULL"):
+        used[d] = used.get(d, 0) + 1
+    for r in rows:
+        r["units"] = used.get(r["digest"], 0)
+    return rows
+
+
+def brief_for(conn: sqlite3.Connection, unit_id: str) -> str | None:
+    """Exactly what one unit was told, re-derived from what it was pinned to.
+
+    This is the whole point of the pin. After a kind is redefined, `spec()`
+    reports what the kind says NOW, which is precisely the wrong answer when
+    you are asking why a particular unit produced what it did.
+    """
+    r = conn.execute("SELECT * FROM unit WHERE unit_id = ?", (unit_id,)).fetchone()
+    if r is None:
+        return None
+    sp = None
+    if r["kind_digest"]:
+        sp = conn.execute("SELECT * FROM kind_version WHERE digest = ?",
+                          (r["kind_digest"],)).fetchone()
+    if sp is None:                       # never claimed, or claimed before pins
+        sp = conn.execute("SELECT * FROM kind WHERE kind = ?",
+                          (r["kind"],)).fetchone()
+    pinned = json.loads(r["skills_used"]) if r["skills_used"] else ()
+    return _to_unit(r, sp, pinned).brief()

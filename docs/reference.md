@@ -18,6 +18,8 @@ superagentic fail UNIT_ID      report one that could not be done
 superagentic release UNIT_ID   hand back, no attempt burned
 superagentic status            what is left, who holds what
 superagentic prompt [KIND]     the spawn prompt, generated from the kind
+superagentic brief UNIT_ID     exactly what one unit was told
+superagentic kinds [KIND]      every definition a kind has had
 superagentic results [KIND]    what the fleet handed back
 superagentic dashboard         a live view of the fleet, in a browser
 superagentic wait              block until done; exit 1 if anything failed
@@ -243,6 +245,30 @@ skill it never loaded is not something it can discover halfway through.
 A prompt pasted out of a README drifts from the kind it was written for, and
 nothing tells you when it has. A test asserts every command the prompt prints
 actually parses against the real CLI.
+
+### `brief` / `kinds`
+
+```bash
+superagentic brief 'run/extract:p0189'   # what THAT unit was told
+superagentic kinds extract               # every definition it has had
+```
+
+```
+kind              digest             units  first line of instructions
+ extract          8e21c0e4d9a1f772      140  Read $path. Record every claim...
+*extract          4465e472f5ecbf95      100  Read $path. Record every claim, and
+```
+
+A kind's definition is **pinned onto each unit when it is claimed**, keyed by
+the hash of its content, so `brief` answers what a unit was actually told
+however the kind has changed since. `spec()` reports what a kind says *now*,
+which is precisely the wrong answer when you are asking why one unit's output
+looks different.
+
+Content-addressed rather than copied: storing the rendered brief on every unit
+is O(units), and a 400,000 unit corpus would carry most of a gigabyte of
+near-identical text. One row per distinct definition instead, and the brief is
+re-derived from it plus that unit's own `meta`.
 
 ### `results`
 

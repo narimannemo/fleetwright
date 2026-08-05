@@ -111,11 +111,24 @@ class TestTheBrief:
         expire(conn)
         assert "attempt 2" in sa.claim(conn, "x", worker="b")[0].brief()
 
-    def test_redefining_reaches_workers_that_have_not_claimed_yet(self, conn):
+    def test_redefining_a_kind_with_live_units_is_refused(self, conn):
+        """The most damaging operation had no guard. Two sessions sharing a
+        database and both defining `extract` clobbered each other mid-run:
+        nothing errored, and the remaining units quietly carried the other
+        session's instructions."""
         sa.define(conn, "x", instructions="old")
         sa.add(conn, "x", ["u1", "u2"])
         sa.claim(conn, "x", worker="a")
-        sa.define(conn, "x", instructions="new")
+        with pytest.raises(ValueError, match="in flight"):
+            sa.define(conn, "x", instructions="new")
+        # Unchanged is always fine, so re-applying a config stays a no-op.
+        sa.define(conn, "x", instructions="old")
+
+    def test_forcing_it_reaches_workers_that_have_not_claimed_yet(self, conn):
+        sa.define(conn, "x", instructions="old")
+        sa.add(conn, "x", ["u1", "u2"])
+        sa.claim(conn, "x", worker="a")
+        sa.define(conn, "x", instructions="new", force=True)
         assert sa.claim(conn, "x", worker="b")[0].instructions == "new"
 
     def test_a_kind_with_no_spec_still_works(self, conn):
@@ -2029,3 +2042,94 @@ class TestResultsOutput:
         capsys.readouterr()
         cli_main(["results", "k", "--db", db, "--json"])
         assert json.loads(capsys.readouterr().out) == []
+
+
+class TestKindVersioning:
+    """A kind redefined mid-run left no record of what any unit was told, and
+    two sessions sharing a database clobbered each other invisibly."""
+
+    def test_a_unit_remembers_the_definition_it_was_claimed_under(self, conn):
+        sa.define(conn, "k", instructions="the original text")
+        sa.add(conn, "k", ["a", "b"])
+        first = sa.claim(conn, "k", worker="w")[0]
+        sa.finish(conn, first.unit_id, worker="w")
+        sa.define(conn, "k", instructions="something else entirely", force=True)
+        # spec() reports what the kind says NOW, which is the wrong answer.
+        assert sa.spec(conn, "k")["instructions"] == "something else entirely"
+        assert "the original text" in sa.brief_for(conn, first.unit_id)
+
+    def test_the_pin_is_content_addressed_not_copied(self, conn):
+        """Storing the brief on every unit is O(units): 400,000 of them would
+        carry most of a gigabyte of near-identical text."""
+        sa.define(conn, "k", instructions="one definition")
+        sa.add(conn, "k", [f"u{i}" for i in range(50)])
+        sa.claim(conn, "k", worker="w", n=50)
+        assert conn.execute("SELECT count(*) FROM kind_version").fetchone()[0] == 1
+        digests = {r[0] for r in conn.execute(
+            "SELECT DISTINCT kind_digest FROM unit")}
+        assert len(digests) == 1
+
+    def test_redefining_with_live_units_is_refused(self, conn):
+        sa.define(conn, "k", instructions="a")
+        sa.add(conn, "k", ["u"])
+        with pytest.raises(ValueError, match="waiting"):
+            sa.define(conn, "k", instructions="b")
+
+    def test_an_unchanged_definition_is_always_allowed(self, conn):
+        # Otherwise re-applying a config would fail the moment work exists,
+        # and a config you cannot re-apply stops describing what is running.
+        sa.define(conn, "k", instructions="a", done_when="d")
+        sa.add(conn, "k", ["u"])
+        sa.claim(conn, "k", worker="w")
+        sa.define(conn, "k", instructions="a", done_when="d")
+
+    def test_a_finished_kind_can_be_redefined_freely(self, conn):
+        sa.define(conn, "k", instructions="a")
+        sa.add(conn, "k", ["u"])
+        u = sa.claim(conn, "k", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w")
+        sa.define(conn, "k", instructions="b")      # nothing live: fine
+
+    def test_history_counts_what_ran_under_each_definition(self, conn):
+        sa.define(conn, "k", instructions="v1")
+        sa.add(conn, "k", ["a", "b", "c"])
+        for u in sa.claim(conn, "k", worker="w", n=2):
+            sa.finish(conn, u.unit_id, worker="w")
+        sa.define(conn, "k", instructions="v2", force=True)
+        sa.claim(conn, "k", worker="w")
+        vs = {v["instructions"]: v["units"] for v in sa.kind_versions(conn, "k")}
+        assert vs == {"v1": 2, "v2": 1}
+
+    def test_the_digest_covers_every_field_a_worker_sees(self, conn):
+        # A change in a field workers read must never look unchanged.
+        base = dict(instructions="i", done_when="d", returns="r", tools="t",
+                    skills=["s"], mcp={"m": "c"}, context="x")
+        first = sa.define(conn, "k", **base)
+        for field, value in (("done_when", "other"), ("returns", "other"),
+                             ("tools", "other"), ("skills", ["z"]),
+                             ("mcp", {"m": "z"}), ("context", "z")):
+            assert sa.define(conn, "k", **{**base, field: value}) != first, field
+
+    def test_the_cli_refuses_and_says_what_to_do(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        cli_main(["define", "k", "--db", db, "--instructions", "a", "--done-when", "d"])
+        cli_main(["add", "k", "u", "--db", db])
+        assert cli_main(["define", "k", "--db", db, "--instructions", "b",
+                         "--done-when", "d"]) == 2
+        err = capsys.readouterr().err
+        assert "waiting" in err and "force" in err
+        assert cli_main(["define", "k", "--db", db, "--instructions", "b",
+                         "--done-when", "d", "--force"]) == 0
+
+    def test_mcp_reports_the_refusal_rather_than_raising(self, tmp_path):
+        from superagentic.mcp import Server
+        s = Server(tmp_path / "w.db")
+        s.define_kind({"kind": "k", "instructions": "a", "done_when": "d"})
+        s.add_jobs({"kind": "k", "names": ["u"]})
+        out = s.define_kind({"kind": "k", "instructions": "b", "done_when": "d"})
+        assert out["ok"] is False and out["error"] == "kind_in_use"
+        assert s.define_kind({"kind": "k", "instructions": "b",
+                              "done_when": "d", "force": True})["defined"] == "k"
+
+    def test_brief_on_an_unknown_unit_is_none(self, conn):
+        assert sa.brief_for(conn, "nope:nope") is None

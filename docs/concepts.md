@@ -195,6 +195,33 @@ sa.finish(conn, u.unit_id, result={"claims": ids},
 Ordered, visible in the queue, idempotent, and refused outright if the
 finishing worker had already lost its lease.
 
+## One database is one trust boundary, and the only one
+
+There is no permission model. Everything that shares a file shares everything:
+two orchestrators, twenty workers, all of it. That is worth knowing before you
+point a second session at the same `work.db`.
+
+- **A worker with no `--run` claims from every run**, not just its own. Often
+  what you want, since it makes one dedup pool. Never what you expect.
+- **Either session can cancel, retry or redefine the other's work.** Nothing
+  checks.
+- **Kinds and skills are global to the file**, not scoped to a run.
+
+Only one thing is actually protected: a worker cannot `finish` or `heartbeat` a
+unit it does not hold, because those match on the worker.
+
+So pick deliberately:
+
+| Two sessions | Do this |
+|---|---|
+| unrelated work | separate database files; there was nothing to share |
+| same work, different inputs | one file, one kind, two runs, and **always pass `--run`** |
+| different work, one file | namespace the kind names (`extract-t1`, `extract-t2`) |
+
+And because a shared kind name is the sharp edge, redefining a kind with live
+units is refused unless forced, and every unit pins the definition it was
+claimed under so `superagentic brief` can always say what it was told.
+
 ## `kind` and `name` are opaque
 
 They are strings you chose. Nothing here parses them, and a unit is keyed on

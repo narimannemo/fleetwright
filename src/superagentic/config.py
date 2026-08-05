@@ -78,7 +78,8 @@ def load(path: str | Path) -> dict:
         raise ValueError(f"{p}: {e}") from None
 
 
-def apply(conn, cfg: dict, *, root: Path | None = None) -> dict:
+def apply(conn, cfg: dict, *, root: Path | None = None,
+          force: bool = False) -> dict:
     """Register the skills and define the kinds. Idempotent.
 
     Both underlying calls replace rather than append, so applying the same file
@@ -122,7 +123,7 @@ def apply(conn, cfg: dict, *, root: Path | None = None) -> dict:
                       tools=spec.get("tools"),
                       skills=spec.get("skills"),
                       mcp=spec.get("mcp"),
-                      context=ctx)
+                      context=ctx, force=force)
         out["kinds"].append(name)
     return out
 

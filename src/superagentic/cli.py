@@ -119,10 +119,15 @@ def _cmd_define(a: argparse.Namespace) -> int:
         name, cmd = spec.split("=", 1)
         mcp[name] = cmd
     context = (Path(a.context).read_text(encoding="utf-8") if a.context else None)
-    leases.define(_conn(a), a.kind, instructions, done_when=a.done_when,
-                  returns=a.returns, tools=a.tools, skills=a.skill or None,
-                  mcp=mcp or None, context=context)
-    print(f"defined {a.kind}")
+    try:
+        digest = leases.define(
+            _conn(a), a.kind, instructions, done_when=a.done_when,
+            returns=a.returns, tools=a.tools, skills=a.skill or None,
+            mcp=mcp or None, context=context, force=a.force)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(f"defined {a.kind} [{digest}]")
     if not a.done_when:
         print("  warning: no --done-when. Every worker will decide for itself "
               "what finished means, and they will not agree.", file=sys.stderr)
@@ -174,6 +179,38 @@ def _cmd_prompt(a: argparse.Namespace) -> int:
                                    lease=a.lease))
         if a.n > 1:
             print()
+    return 0
+
+
+def _cmd_brief(a: argparse.Namespace) -> int:
+    """Exactly what one unit was told, however the kind has changed since."""
+    text = leases.brief_for(_conn(a), a.unit_id)
+    if text is None:
+        print(f"no such unit: {a.unit_id}", file=sys.stderr)
+        return 1
+    print(text)
+    return 0
+
+
+def _cmd_kinds(a: argparse.Namespace) -> int:
+    rows = leases.kind_versions(_conn(a), a.kind)
+    if a.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("no kinds defined")
+        return 0
+    current = {r["kind"]: leases.kind_digest(
+        r["kind"], r["instructions"], r["done_when"], r["returns"], r["tools"],
+        r["skills"], r["mcp"], r["context"])
+        for r in [dict(x) for x in _conn(a).execute("SELECT * FROM kind")]}
+    print(f"{'kind':<18}{'digest':<18}{'units':>7}  first line of instructions")
+    for r in rows:
+        mark = "*" if current.get(r["kind"]) == r["digest"] else " "
+        first = (r["instructions"] or "").strip().splitlines()[:1]
+        print(f"{mark}{r['kind']:<17}{r['digest']:<18}{r['units']:>7}  "
+              f"{(first[0] if first else '')[:44]}")
+    print("\n* the definition in force now", file=sys.stderr)
     return 0
 
 
@@ -530,6 +567,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="an MCP server a worker MUST have; repeatable")
     s.add_argument("--context", metavar="FILE",
                    help="read-only material every worker of this kind receives")
+    s.add_argument("--force", action="store_true",
+                   help="redefine even with units waiting or in flight")
     s.set_defaults(fn=_cmd_define)
 
     s = common(sub.add_parser(
@@ -539,6 +578,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--worker", default="agent")
     s.add_argument("--lease", type=float, default=leases.DEFAULT_LEASE)
     s.set_defaults(fn=_cmd_prompt)
+
+    s = common(sub.add_parser(
+        "brief", help="exactly what one unit was told, however the kind changed since"))
+    s.add_argument("unit_id")
+    s.set_defaults(fn=_cmd_brief)
+
+    s = common(sub.add_parser(
+        "kinds", help="every definition a kind has had, and what ran under each"))
+    s.add_argument("kind", nargs="?")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=_cmd_kinds)
 
     s = common(sub.add_parser("results", help="what the fleet produced"))
     s.add_argument("kind", nargs="?")
@@ -681,6 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run", help="enqueue declared units into this run")
     s.add_argument("--no-units", action="store_true",
                    help="apply skills and kinds only")
+    s.add_argument("--force", action="store_true",
+                   help="redefine kinds even with units waiting or in flight")
     s.set_defaults(fn=_cmd_apply)
 
     s = sub.add_parser(
@@ -727,7 +779,7 @@ def _cmd_apply(a: argparse.Namespace) -> int:
         return 2
     conn = _conn(a)
     try:
-        out = config.apply(conn, cfg, root=f.parent)
+        out = config.apply(conn, cfg, root=f.parent, force=a.force)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2

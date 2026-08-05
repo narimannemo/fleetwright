@@ -124,7 +124,12 @@ def _tools() -> list[dict]:
                     "context": {"type": "string", "description":
                                 "Read-only material every worker of this kind "
                                 "receives: a glossary, conventions, a schema. "
-                                "Never written by a worker."}}},
+                                "Never written by a worker."},
+                    "force": {"type": "boolean", "description":
+                              "Redefine even when units are waiting or in "
+                              "flight. Refused without this, because changing "
+                              "a kind mid-run silently gives the remaining "
+                              "units different instructions."}}},
         },
         {
             "name": "add_jobs",
@@ -287,11 +292,16 @@ class Server:
         return {"skills": leases.skills(self.conn)}
 
     def define_kind(self, a: dict) -> dict:
-        leases.define(self.conn, a["kind"], a["instructions"],
-                      done_when=a.get("done_when"), returns=a.get("returns"),
-                      tools=a.get("tools"), skills=a.get("skills"),
-                      mcp=a.get("mcp"), context=a.get("context"))
-        out = {"defined": a["kind"]}
+        try:
+            digest = leases.define(
+                self.conn, a["kind"], a["instructions"],
+                done_when=a.get("done_when"), returns=a.get("returns"),
+                tools=a.get("tools"), skills=a.get("skills"),
+                mcp=a.get("mcp"), context=a.get("context"),
+                force=bool(a.get("force")))
+        except ValueError as e:
+            return {"ok": False, "error": "kind_in_use", "message": str(e)}
+        out = {"defined": a["kind"], "digest": digest}
         unknown = [r["name"] for r in leases.resolve_skills(self.conn, a.get("skills"))
                    if r.get("unregistered")]
         if unknown:
