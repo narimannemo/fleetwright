@@ -302,7 +302,9 @@ def _cmd_claim(a: argparse.Namespace) -> int:
     worker = a.worker or leases.this_worker()
     got = leases.claim(_conn(a), a.kind, worker=worker, lease=a.lease, n=a.n,
                        run=a.run,
-                       model=a.model or os.environ.get("SUPERAGENTIC_MODEL"))
+                       model=a.model or os.environ.get("SUPERAGENTIC_MODEL"),
+                       spawned_by=a.spawned_by
+                       or os.environ.get("SUPERAGENTIC_SPAWNED_BY"))
     if not got:
         if not a.json:
             print("nothing to claim", file=sys.stderr)
@@ -734,6 +736,15 @@ def build_parser() -> argparse.ArgumentParser:
                                    "SUPERAGENTIC_MODEL also works.")
     s.add_argument("--brief", action="store_true",
                    help="print the full assignment, for piping into an agent")
+    # The one edge nothing here can observe. A subagent cannot see that a
+    # session spawned it, so it has to be told, and env is the right channel:
+    # a subagent inherits its parent's environment, so an orchestrator exports
+    # this once and every worker it spawns is labelled without touching a
+    # single worker prompt.
+    s.add_argument("--spawned-by", metavar="WHO",
+                   help="who spawned this worker, e.g. the orchestrating "
+                        "session. Declared, never measured. "
+                        "SUPERAGENTIC_SPAWNED_BY also works.")
     s.set_defaults(fn=_cmd_claim)
 
     # `finish` at every layer. The library has always been finish(), the MCP
@@ -861,8 +872,55 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _hoist_positionals(parser: argparse.ArgumentParser,
+                       argv: list[str]) -> list[str]:
+    """Move bare words in front of the flags, for `nargs="*"` subcommands.
+
+    argparse cannot match `add extract --db x p1 p2`. It fills a trailing
+    `nargs="*"` from the FIRST run of positionals, which is empty here, and
+    then calls `p1 p2` unrecognised. `add extract p1 p2 --db x` works. Both
+    are things people write, one of them dies, and the error names the units
+    rather than the ordering, so it reads as "those units are bad".
+
+    Which flags take a value is read off the parser, so this cannot drift
+    away from the flags it has to know about.
+    """
+    takes_value = {o for act in parser._actions for o in act.option_strings
+                   if act.nargs != 0}
+    words, flags, i = [], [], 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":                      # everything after is literal
+            words += argv[i + 1:]
+            break
+        if tok.startswith("-") and tok != "-":
+            flags.append(tok)
+            if "=" not in tok and tok in takes_value and i + 1 < len(argv):
+                flags.append(argv[i + 1])
+                i += 1
+        else:
+            words.append(tok)
+        i += 1
+    return words + flags
+
+
+#: The subcommands whose last positional is `nargs="*"`. Asserted in the tests
+#: against the built parser, so adding a fourth cannot quietly skip the fix.
+_VARIADIC = ("add", "retry", "cancel")
+
+
 def main(argv: list[str] | None = None) -> int:
-    a = build_parser().parse_args(argv)
+    parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Only for the subcommands that actually take a list of names.
+    for i, tok in enumerate(argv):
+        if tok in _VARIADIC:
+            sub = parser._subparsers._group_actions[0].choices[tok]
+            argv = argv[:i + 1] + _hoist_positionals(sub, argv[i + 1:])
+            break
+        if not tok.startswith("-"):
+            break                            # some other subcommand
+    a = parser.parse_args(argv)
     return a.fn(a)
 
 

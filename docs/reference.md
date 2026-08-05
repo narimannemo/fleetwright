@@ -281,6 +281,17 @@ A prompt pasted out of a README drifts from the kind it was written for, and
 nothing tells you when it has. A test asserts every command the prompt prints
 actually parses against the real CLI.
 
+### `claim --spawned-by`
+
+```bash
+export SUPERAGENTIC_SPAWNED_BY="session-a"     # once, before spawning
+```
+
+Who spawned this worker. Declared, never measured: a subagent cannot observe
+that a session spawned it, so it has to be told. The environment variable is
+the useful form, because a subagent inherits its parent's environment and one
+export labels the whole fleet without editing any worker prompt.
+
 ### `lineage`
 
 ```bash

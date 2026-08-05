@@ -5,6 +5,30 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.18.1] — 2026-08-05
+
+Both of these were found by installing 0.18.0 from PyPI and using it, not by
+running the tests, which passed on all six platforms.
+
+### Fixed
+
+- **`superagentic add extract --db work.db p1 p2` reported `unrecognized
+  arguments: p1 p2`.** argparse fills a trailing `nargs="*"` from the FIRST run
+  of positionals, which is empty when the names come after the flags, so only
+  `add extract p1 p2 --db work.db` worked. Both are things people write and the
+  error named the units rather than the ordering, so it read as "those units
+  are bad". Affected `add`, `retry` and `cancel`. Which flags take a value is
+  now read off the parser itself, so it cannot drift from the flags it has to
+  know about, and a test fails if a fourth variadic subcommand is added without
+  the fix.
+- **`spawned_by` was recorded by the library and drawn by the dashboard, but no
+  CLI could set it.** 0.18.0 added the column and the panel and left the flag
+  out, so the edge it exists to record was always null for anyone using the
+  shell. `superagentic claim --spawned-by WHO`, and `SUPERAGENTIC_SPAWNED_BY`
+  in the environment, which is the useful one: a subagent inherits its parent's
+  environment, so an orchestrator exports it once and every worker it spawns is
+  labelled without editing a single worker prompt.
+
 ## [0.18.0] — 2026-08-05
 
 ### Fixed

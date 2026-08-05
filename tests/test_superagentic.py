@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import superagentic as sa
+from superagentic import cli
 from superagentic.cli import main as cli_main
 from superagentic.mcp import Server
 
@@ -609,7 +610,7 @@ class TestMCP:
 
 
 def commands_named_in(text: str) -> set[str]:
-    """Commands a document actually invokes, not sentences about the product.
+    r"""Commands a document actually invokes, not sentences about the product.
 
     `superagentic (\w+)` also matches prose: "superagentic is the shared list"
     yields `is`, and "superagentic exists to prevent" yields `exists`. Only a
@@ -2317,3 +2318,83 @@ class TestTimeline:
     def test_the_dashboard_hides_the_flow_panel_when_nothing_chains(self):
         from superagentic import dashboard
         assert '$("#flowcard").hidden = !fl.length' in dashboard.PAGE
+
+
+class TestArgumentOrder:
+    """`add extract --db x p1` and `add extract p1 --db x` are the same command.
+
+    argparse says otherwise: it fills a trailing `nargs="*"` from the first run
+    of positionals, finds none, and reports `unrecognized arguments: p1`. The
+    error names the units rather than the ordering, so it reads as though the
+    units are bad. Every worker writing its own command line hits this.
+    """
+
+    def test_names_after_the_flags_are_still_names(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["define", "ex", "--db", db, "--instructions", "x",
+                  "--done-when", "y"])
+        assert cli_main(["add", "ex", "--db", db, "p1", "p2"]) == 0
+        conn = sa.connect(db)
+        assert sorted(u["name"] for u in sa.units(conn)["units"]) == ["p1", "p2"]
+
+    def test_either_order_gives_the_same_queue(self, tmp_path):
+        both = []
+        for order in (["ex", "a", "b", "--db"], ["ex", "--db"]):
+            db = str(tmp_path / f"{len(both)}.db")
+            cli_main(["define", "ex", "--db", db, "--instructions", "x",
+                      "--done-when", "y"])
+            argv = ["add"] + [t if t != "--db" else "--db" for t in order]
+            argv += [db] + ([] if "a" in order else ["a", "b"])
+            cli_main(argv)
+            conn = sa.connect(db)
+            both.append(sorted(u["name"] for u in sa.units(conn)["units"]))
+        assert both[0] == both[1] == ["a", "b"]
+
+    def test_a_value_that_looks_like_a_name_is_not_hoisted(self, tmp_path):
+        """`--meta {...}` must stay attached to its flag."""
+        db = str(tmp_path / "w.db")
+        cli_main(["define", "ex", "--db", db, "--instructions", "x",
+                  "--done-when", "y"])
+        cli_main(["add", "ex", "--db", db, "--meta", '{"path": "/p"}', "p1"])
+        conn = sa.connect(db)
+        rows = conn.execute("SELECT name, meta FROM unit").fetchall()
+        assert [r["name"] for r in rows] == ["p1"]
+        assert json.loads(rows[0]["meta"]) == {"path": "/p"}
+
+    def test_every_variadic_subcommand_is_covered(self):
+        """The fix is opt-in per subcommand, so a fourth must not slip past."""
+        parser = cli.build_parser()
+        choices = parser._subparsers._group_actions[0].choices
+        variadic = {name for name, sub in choices.items()
+                    if any(not act.option_strings and act.nargs == "*"
+                           for act in sub._actions)}
+        assert variadic == set(cli._VARIADIC), (
+            "a subcommand takes a list of names but is not in _VARIADIC, so "
+            "names written after its flags will be reported as unrecognised")
+
+
+class TestSpawnedBy:
+    """The one edge nothing can observe: that a session spawned this worker."""
+
+    def test_the_flag_reaches_the_database(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["define", "ex", "--db", db, "--instructions", "x",
+                  "--done-when", "y"])
+        cli_main(["add", "ex", "--db", db, "p1"])
+        cli_main(["claim", "ex", "--db", db, "--worker", "w0",
+                  "--spawned-by", "session-a"])
+        conn = sa.connect(db)
+        assert conn.execute(
+            "SELECT spawned_by FROM unit").fetchone()["spawned_by"] == "session-a"
+
+    def test_the_environment_works_too(self, tmp_path, monkeypatch):
+        """A subagent inherits its parent's env, so one export labels a fleet."""
+        db = str(tmp_path / "w.db")
+        cli_main(["define", "ex", "--db", db, "--instructions", "x",
+                  "--done-when", "y"])
+        cli_main(["add", "ex", "--db", db, "p1"])
+        monkeypatch.setenv("SUPERAGENTIC_SPAWNED_BY", "session-b")
+        cli_main(["claim", "ex", "--db", db, "--worker", "w0"])
+        conn = sa.connect(db)
+        assert conn.execute(
+            "SELECT spawned_by FROM unit").fetchone()["spawned_by"] == "session-b"
