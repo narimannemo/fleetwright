@@ -186,6 +186,15 @@ CREATE TABLE IF NOT EXISTS unit (
     -- under one version and half under another, and only a record taken at
     -- claim time can tell them apart.
     skills_used TEXT,
+    -- The unit whose `then=` created this one. The only edge in this schema
+    -- that is not hierarchical, and the only one worth drawing as a graph:
+    -- run, kind and worker all fan out from a parent, but lineage is a chain
+    -- across stages and can branch.
+    parent_unit_id TEXT,
+    -- Who spawned the worker that holds this. Declared, like model: nothing
+    -- here can see that one Claude session spawned ten subagents, and without
+    -- being told there is no orchestrator-to-worker edge at all.
+    spawned_by TEXT,
     -- Which definition of its kind this unit was claimed under. Without it, a
     -- kind redefined mid-run leaves no record of what any unit was told, and
     -- two sessions sharing a database can clobber each other invisibly.
@@ -334,6 +343,7 @@ INDEXES = """
 CREATE INDEX IF NOT EXISTS unit_pick ON unit(kind, status, priority DESC, created_at);
 CREATE INDEX IF NOT EXISTS unit_lease ON unit(status, leased_until);
 CREATE INDEX IF NOT EXISTS unit_run ON unit(run_id, status);
+CREATE INDEX IF NOT EXISTS unit_parent ON unit(parent_unit_id);
 """
 
 
@@ -349,7 +359,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
                                   ("run_id", "TEXT"), ("model", "TEXT"),
                                   ("skills_used", "TEXT"), ("tokens_in", "INTEGER"),
                                   ("tokens_out", "INTEGER"), ("cost", "REAL"),
-                                  ("kind_digest", "TEXT"))),
+                                  ("kind_digest", "TEXT"),
+                                  ("parent_unit_id", "TEXT"),
+                                  ("spawned_by", "TEXT"))),
                         ("kind", (("skills", "TEXT"), ("mcp", "TEXT"),
                                   ("context", "TEXT")))):
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -514,7 +526,7 @@ def unit_id(kind: str, name: str, run: str | None = None) -> str:
 
 def add(conn: sqlite3.Connection, kind: str, names: list[str], *,
         priority: int = 0, meta: dict | None = None,
-        run: str | None = None) -> int:
+        run: str | None = None, parent: str | None = None) -> int:
     """Enqueue units of one kind. Returns how many were new.
 
     Idempotent on `(run, kind, name)`, so re-running your enumeration after the
@@ -526,10 +538,10 @@ def add(conn: sqlite3.Connection, kind: str, names: list[str], *,
     before = conn.execute("SELECT count(*) FROM unit").fetchone()[0]
     conn.executemany(
         "INSERT OR IGNORE INTO unit "
-        "(unit_id, kind, name, run_id, status, priority, meta, created_at, "
-        "updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        [(unit_id(kind, n, run), kind, n, run, OPEN, priority, payload, now, now)
-         for n in names])
+        "(unit_id, kind, name, run_id, status, priority, meta, parent_unit_id, "
+        "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [(unit_id(kind, n, run), kind, n, run, OPEN, priority, payload, parent,
+          now, now) for n in names])
     conn.commit()
     return conn.execute("SELECT count(*) FROM unit").fetchone()[0] - before
 
@@ -537,7 +549,8 @@ def add(conn: sqlite3.Connection, kind: str, names: list[str], *,
 def claim(conn: sqlite3.Connection, kind: str | None = None, *,
           worker: str | None = None, lease: float = DEFAULT_LEASE,
           n: int = 1, max_attempts: int = MAX_ATTEMPTS,
-          run: str | None = None, model: str | None = None) -> list[Unit]:
+          run: str | None = None, model: str | None = None,
+          spawned_by: str | None = None) -> list[Unit]:
     """Take up to `n` units, or get `[]` when there is nothing to do.
 
     The atomicity is one `UPDATE`. SQLite runs it inside an implicit
@@ -561,15 +574,16 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
         where, params = where + " AND run_id = ?", [*params, run]
     conn.execute(
         f"""UPDATE unit
-               SET status = ?, worker = ?, model = ?, leased_until = ?,
-                   lease_token = ?, claimed_at = ?, attempts = attempts + 1,
-                   updated_at = ?
+               SET status = ?, worker = ?, model = ?, spawned_by = ?,
+                   leased_until = ?, lease_token = ?, claimed_at = ?,
+                   attempts = attempts + 1, updated_at = ?
              WHERE unit_id IN (
                    SELECT unit_id FROM unit
                     WHERE status = ? {where}
                     ORDER BY priority DESC, created_at
                     LIMIT ?)""",
-        [LEASED, worker, model, now + lease, token, now, now, OPEN, *params, n])
+        [LEASED, worker, model, spawned_by, now + lease, token, now, now, OPEN,
+         *params, n])
     conn.commit()
     rows = conn.execute(
         "SELECT * FROM unit WHERE lease_token = ? ORDER BY priority DESC, created_at",
@@ -672,6 +686,8 @@ def finish(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
     Nothing is enqueued if the close failed, so a worker that lost its lease
     cannot inject work off the back of a unit it no longer owns.
     """
+    parent = conn.execute("SELECT run_id FROM unit WHERE unit_id = ?",
+                          (unit_id,)).fetchone()
     ok = _close(conn, unit_id, DONE, worker=worker, note=note, result=result)
     if ok and any(v is not None for v in (tokens_in, tokens_out, cost)):
         conn.execute(
@@ -681,7 +697,15 @@ def finish(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
     if ok and then:
         for kind, names in then.items():
             if names:
-                add(conn, kind, list(names))
+                # Inherit the parent's run, and record the parent. Neither
+                # happened before: a second stage fell out of the run entirely,
+                # so `wait --run` returned as soon as stage one finished and
+                # `runs` under-reported the work. And nothing recorded that one
+                # unit had caused another, which is the only genuinely
+                # graph-shaped relationship this schema has.
+                add(conn, kind, list(names),
+                    run=parent["run_id"] if parent else None,
+                    parent=unit_id)
     return ok
 
 
@@ -1454,3 +1478,114 @@ def state(conn: sqlite3.Connection, *, stale_after: float = 0.0) -> dict:
         "attention": attention,
         "next": nxt,
     }
+
+
+def lineage(conn: sqlite3.Connection, unit_id: str) -> dict:
+    """One unit's ancestors and descendants, as a chain and a tree.
+
+    The only query in this module that follows an edge rather than filtering
+    rows, because lineage is the only relationship here that is not a
+    hierarchy: run, kind and worker all fan out from one parent, and a unit's
+    ancestry can be several stages deep.
+    """
+    def row(uid):
+        r = conn.execute(
+            "SELECT unit_id, kind, name, status, note, parent_unit_id "
+            "FROM unit WHERE unit_id = ?", (uid,)).fetchone()
+        return dict(r) if r else None
+
+    me = row(unit_id)
+    if me is None:
+        return {}
+    ancestors, seen, cur = [], {unit_id}, me["parent_unit_id"]
+    while cur and cur not in seen:
+        # `seen` guards a cycle. `then` cannot make one today, but a hand-
+        # edited database can, and an infinite loop in a read query is a
+        # miserable way to find that out.
+        seen.add(cur)
+        p = row(cur)
+        if p is None:
+            break
+        ancestors.append(p)
+        cur = p["parent_unit_id"]
+
+    def children(uid, depth=0):
+        if depth > 20:
+            return []
+        out = []
+        for r in conn.execute(
+                "SELECT unit_id, kind, name, status, note FROM unit "
+                "WHERE parent_unit_id = ? ORDER BY kind, name", (uid,)):
+            c = dict(r)
+            c["children"] = children(c["unit_id"], depth + 1)
+            out.append(c)
+        return out
+
+    return {"unit": me, "ancestors": list(reversed(ancestors)),
+            "descendants": children(unit_id)}
+
+
+def flow(conn: sqlite3.Connection, *, run: str | None = None) -> list[dict]:
+    """Which kinds cause which, and how much. Empty when nothing chains.
+
+    Aggregated to kinds rather than units on purpose. A forest of four hundred
+    thousand individual lineages is not a picture; `extract -> audit -> gloss`
+    with counts on the edges is.
+    """
+    where, args = "", []
+    if run:
+        where, args = " AND c.run_id = ?", [run]
+    rows = conn.execute(
+        f"SELECT p.kind AS src, c.kind AS dst, count(*) AS n, "
+        f"       sum(c.status = 'done') AS done, "
+        f"       sum(c.status = 'failed') AS failed "
+        f"  FROM unit c JOIN unit p ON p.unit_id = c.parent_unit_id "
+        f" WHERE 1=1{where} GROUP BY p.kind, c.kind ORDER BY n DESC", args)
+    return [{"from": r["src"], "to": r["dst"], "units": r["n"],
+             "done": r["done"] or 0, "failed": r["failed"] or 0} for r in rows]
+
+
+def timeline(conn: sqlite3.Connection, *, run: str | None = None,
+             limit: int = 4000) -> dict:
+    """Who held what, when. One lane per worker, one bar per unit.
+
+    This answers the question people actually have about a fleet, which is not
+    "what caused what" but "was it saturated, who sat idle, and what held up
+    the end". A node-link diagram cannot show any of that; a time axis shows
+    all three at a glance.
+    """
+    where, args = ["claimed_at IS NOT NULL"], []
+    if run:
+        where.append("run_id = ?")
+        args.append(run)
+    rows = conn.execute(
+        f"SELECT unit_id, name, kind, worker, model, spawned_by, status, "
+        f"       claimed_at, updated_at, cost FROM unit "
+        f" WHERE {' AND '.join(where)} ORDER BY claimed_at LIMIT ?",
+        [*args, limit]).fetchall()
+    now = time.time()
+    bars = [{
+        "unit_id": r["unit_id"], "name": r["name"], "kind": r["kind"],
+        "worker": r["worker"] or "?", "model": r["model"],
+        "spawned_by": r["spawned_by"], "status": r["status"],
+        "start": r["claimed_at"],
+        "end": (r["updated_at"] if r["status"] in TERMINAL else now),
+        "cost": r["cost"],
+    } for r in rows]
+    lanes: dict[str, dict] = {}
+    for b in bars:
+        lane = lanes.setdefault(b["worker"], {
+            "worker": b["worker"], "spawned_by": b["spawned_by"],
+            "units": 0, "busy": 0.0})
+        lane["units"] += 1
+        lane["busy"] += max(0.0, b["end"] - b["start"])
+    span = ((min(b["start"] for b in bars), max(b["end"] for b in bars))
+            if bars else (now, now))
+    wall = max(span[1] - span[0], 1e-9)
+    for lane in lanes.values():
+        # Idle is the honest number: a lane that is 20% busy is a worker that
+        # spent four fifths of the run waiting, which no count of units shows.
+        lane["idle"] = max(0.0, 1 - lane["busy"] / wall)
+    return {"bars": bars, "lanes": sorted(lanes.values(), key=lambda x: -x["busy"]),
+            "from": span[0], "to": span[1], "wall": wall,
+            "truncated": len(rows) >= limit}

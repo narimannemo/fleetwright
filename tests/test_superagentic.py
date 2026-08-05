@@ -2217,3 +2217,103 @@ class TestProjectState:
     def test_the_skill_tells_a_new_session_to_orient(self):
         import superagentic
         assert "superagentic state" in superagentic.skill_text()
+
+
+class TestLineage:
+    """The only relationship here that is not a hierarchy, and the one that
+    was silently not recorded at all."""
+
+    def _chain(self, conn):
+        for k in ("extract", "audit", "gloss"):
+            sa.define(conn, k, instructions=f"do $name ({k})", done_when="d")
+        r = sa.start_run(conn, label="L")
+        sa.add(conn, "extract", ["p1"], run=r)
+        u = sa.claim(conn, "extract", worker="w", run=r)[0]
+        sa.finish(conn, u.unit_id, worker="w", then={"audit": ["p1-c1"]})
+        a = sa.claim(conn, "audit", worker="w", run=r)[0]
+        sa.finish(conn, a.unit_id, worker="w", then={"gloss": ["p1-c1-g"]})
+        return r, u, a
+
+    def test_then_spawned_units_stay_in_the_run(self, conn):
+        """They fell out entirely: `wait --run` returned as soon as stage one
+        finished and `runs` under-reported the work."""
+        r, _, _ = self._chain(conn)
+        rows = list(conn.execute("SELECT kind, run_id FROM unit"))
+        assert all(row[1] == r for row in rows), rows
+        assert sa.runs(conn)[0]["units"] == 3
+
+    def test_then_records_which_unit_caused_which(self, conn):
+        r, u, a = self._chain(conn)
+        lin = sa.lineage(conn, sa.unit_id("gloss", "p1-c1-g", r))
+        assert [x["kind"] for x in lin["ancestors"]] == ["extract", "audit"]
+        assert lin["unit"]["kind"] == "gloss"
+
+    def test_descendants_come_back_as_a_tree(self, conn):
+        r, u, _ = self._chain(conn)
+        lin = sa.lineage(conn, u.unit_id)
+        assert lin["descendants"][0]["kind"] == "audit"
+        assert lin["descendants"][0]["children"][0]["kind"] == "gloss"
+
+    def test_a_cycle_cannot_hang_the_query(self, conn):
+        # `then` cannot make one, but a hand-edited database can, and an
+        # infinite loop in a read query is a miserable way to find out.
+        sa.add(conn, "k", ["a", "b"])
+        conn.execute("UPDATE unit SET parent_unit_id='k:b' WHERE unit_id='k:a'")
+        conn.execute("UPDATE unit SET parent_unit_id='k:a' WHERE unit_id='k:b'")
+        conn.commit()
+        assert len(sa.lineage(conn, "k:a")["ancestors"]) <= 2
+
+    def test_flow_aggregates_to_kinds_not_units(self, conn):
+        # A forest of 400,000 individual chains is not a picture.
+        self._chain(conn)
+        f = {(x["from"], x["to"]): x["units"] for x in sa.flow(conn)}
+        assert f == {("extract", "audit"): 1, ("audit", "gloss"): 1}
+
+    def test_flow_is_empty_when_nothing_chains(self, conn):
+        sa.add(conn, "k", ["a"])
+        assert sa.flow(conn) == []
+
+    def test_lineage_of_an_unknown_unit_is_empty(self, conn):
+        assert sa.lineage(conn, "nope") == {}
+
+
+class TestTimeline:
+    def test_lanes_report_idle_not_just_counts(self, conn):
+        """A lane that is 20% busy is a worker that spent four fifths of the
+        run waiting, which no count of units shows."""
+        import time as _t
+        sa.add(conn, "k", ["a", "b"])
+        now = _t.time()
+        u1 = sa.claim(conn, "k", worker="busy")[0]
+        u2 = sa.claim(conn, "k", worker="idle")[0]
+        for uid, span in ((u1.unit_id, 100.0), (u2.unit_id, 5.0)):
+            conn.execute("UPDATE unit SET claimed_at=?, updated_at=?, status='done' "
+                         "WHERE unit_id=?", (now - 100, now - 100 + span, uid))
+        conn.commit()
+        lanes = {x["worker"]: x for x in sa.timeline(conn)["lanes"]}
+        assert lanes["busy"]["idle"] < 0.05
+        assert lanes["idle"]["idle"] > 0.9
+
+    def test_it_says_when_it_truncated(self, conn):
+        import time as _t
+        sa.add(conn, "k", [f"u{i}" for i in range(30)])
+        now = _t.time()
+        for u in sa.claim(conn, "k", worker="w", n=30):
+            conn.execute("UPDATE unit SET claimed_at=? WHERE unit_id=?",
+                         (now, u.unit_id))
+        conn.commit()
+        assert sa.timeline(conn, limit=10)["truncated"] is True
+        assert sa.timeline(conn, limit=100)["truncated"] is False
+
+    def test_unclaimed_units_are_not_bars(self, conn):
+        sa.add(conn, "k", ["never-claimed"])
+        assert sa.timeline(conn)["bars"] == []
+
+    def test_a_worker_records_who_spawned_it(self, conn):
+        sa.add(conn, "k", ["a"])
+        sa.claim(conn, "k", worker="agent-3", spawned_by="session-a")
+        assert sa.timeline(conn)["lanes"][0]["spawned_by"] == "session-a"
+
+    def test_the_dashboard_hides_the_flow_panel_when_nothing_chains(self):
+        from superagentic import dashboard
+        assert '$("#flowcard").hidden = !fl.length' in dashboard.PAGE

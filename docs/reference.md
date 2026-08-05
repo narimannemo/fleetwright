@@ -20,6 +20,7 @@ superagentic release UNIT_ID   hand back, no attempt burned
 superagentic status            what is left, who holds what
 superagentic prompt [KIND]     the spawn prompt, generated from the kind
 superagentic brief UNIT_ID     exactly what one unit was told
+superagentic lineage UNIT_ID   what caused it, and what it caused
 superagentic kinds [KIND]      every definition a kind has had
 superagentic results [KIND]    what the fleet handed back
 superagentic dashboard         a live view of the fleet, in a browser
@@ -279,6 +280,28 @@ skill it never loaded is not something it can discover halfway through.
 A prompt pasted out of a README drifts from the kind it was written for, and
 nothing tells you when it has. A test asserts every command the prompt prints
 actually parses against the real CLI.
+
+### `lineage`
+
+```bash
+superagentic lineage 'run/gloss:p001-c0-g'
+```
+
+```
+extract:p001  [done]
+  audit:p001-c0  [done]
+    gloss:p001-c0-g  [done]  <- this one
+```
+
+`then={"audit": [...]}` is the only place a unit causes another unit to exist,
+and it is the only relationship here that is not a hierarchy: run, kind and
+worker all fan out from one parent, but lineage is a chain across stages and it
+branches.
+
+**It also fixes a bug.** Follow-on units used to inherit neither the parent's
+run nor a link to it, so a second stage fell out of the run entirely: `wait
+--run` returned as soon as stage one finished, and `runs` under-reported the
+work.
 
 ### `brief` / `kinds`
 

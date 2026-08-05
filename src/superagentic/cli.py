@@ -192,6 +192,29 @@ def _cmd_brief(a: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_lineage(a: argparse.Namespace) -> int:
+    lin = leases.lineage(_conn(a), a.unit_id)
+    if not lin:
+        print(f"no such unit: {a.unit_id}", file=sys.stderr)
+        return 1
+    if a.json:
+        print(json.dumps(lin, indent=2, ensure_ascii=False))
+        return 0
+    for i, anc in enumerate(lin["ancestors"]):
+        print(f"{'  ' * i}{anc['kind']}:{anc['name']}  [{anc['status']}]")
+    depth = len(lin["ancestors"])
+    u = lin["unit"]
+    print(f"{'  ' * depth}{u['kind']}:{u['name']}  [{u['status']}]  <- this one")
+
+    def show(nodes, d):
+        for n in nodes:
+            note = f"  {n['note']}" if n["status"] == leases.FAILED and n["note"] else ""
+            print(f"{'  ' * d}{n['kind']}:{n['name']}  [{n['status']}]{note}")
+            show(n["children"], d + 1)
+    show(lin["descendants"], depth + 1)
+    return 0
+
+
 def _cmd_kinds(a: argparse.Namespace) -> int:
     rows = leases.kind_versions(_conn(a), a.kind)
     if a.json:
@@ -662,6 +685,12 @@ def build_parser() -> argparse.ArgumentParser:
         "brief", help="exactly what one unit was told, however the kind changed since"))
     s.add_argument("unit_id")
     s.set_defaults(fn=_cmd_brief)
+
+    s = common(sub.add_parser(
+        "lineage", help="what caused this unit, and what it caused"))
+    s.add_argument("unit_id")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=_cmd_lineage)
 
     s = common(sub.add_parser(
         "kinds", help="every definition a kind has had, and what ran under each"))

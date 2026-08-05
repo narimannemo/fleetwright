@@ -42,11 +42,13 @@ from .leases import (
     fail,
     failures,
     finish,
+    flow,
     heartbeat,
     iter_results,
     kind_digest,
     kind_versions,
     leased,
+    lineage,
     outstanding,
     progress,
     reclaim,
@@ -62,6 +64,7 @@ from .leases import (
     start_run,
     state,
     this_worker,
+    timeline,
     unit_id,
     units,
     worker_prompt,
@@ -79,14 +82,14 @@ def skill_text() -> str:
     return (Path(__file__).parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 __all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
            "Unit", "add", "brief_for", "cancel", "claim", "connect", "define", "fail", "failures",
-           "finish", "heartbeat", "iter_results", "kind_digest",
-           "kind_versions", "leased", "progress", "reclaim", "release",
+           "finish", "flow", "heartbeat", "iter_results", "kind_digest",
+           "kind_versions", "leased", "lineage", "progress", "reclaim", "release",
            "outstanding", "register_skill", "resolve_skills", "results", "retry",
-           "run", "runs", "state",
+           "run", "runs", "state", "timeline",
            "skills", "spec", "start_run", "this_worker",
            "config", "shape", "skill_text", "unit_id", "units", "worker_prompt"]

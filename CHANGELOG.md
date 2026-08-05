@@ -5,6 +5,40 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.18.0] — 2026-08-05
+
+### Fixed
+
+- **`then=` dropped the run and recorded no parent.** A second stage fell out
+  of its run entirely, so `wait --run` returned as soon as stage one finished
+  and `runs` under-reported the work. Follow-on units now inherit the parent's
+  run and record `parent_unit_id`.
+
+### Added
+
+- **`superagentic lineage <unit_id>`**, walking the chain in both directions.
+  `then=` is the only place a unit causes another unit to exist, and it is the
+  only relationship in this schema that is not a hierarchy: run, kind and
+  worker all fan out from one parent, but lineage is a chain across stages and
+  it branches.
+- **`spawned_by` on a claim**, so the orchestrator-to-worker edge exists at
+  all. Nothing here can see that one Claude session spawned ten subagents;
+  without being told, there is no such edge to draw. Declared, like model.
+- **A "who held what, when" panel**: one lane per worker, one bar per unit,
+  time across the page, with the percentage of wall-clock each lane was busy.
+  This is the picture worth having. Two sessions of five workers each did
+  roughly equal unit counts and ran at 69–92% and 24–41% busy respectively, and
+  no table shows that.
+- **A "what caused what" panel**, aggregated to kinds and hidden entirely when
+  nothing chains. A forest of individual lineages is not a picture;
+  `extract -> audit -> gloss` with counts on the edges is.
+
+### Notes
+
+- Everything else in this schema is a tree: `run -> unit`, `kind -> unit`,
+  `worker -> unit`. Drawing that as a node-link graph would be a worse version
+  of the tables that already exist, so it is deliberately not drawn.
+
 ## [0.17.0] — 2026-08-05
 
 ### Added

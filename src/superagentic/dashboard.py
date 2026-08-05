@@ -311,6 +311,20 @@ tr.run { cursor:pointer; }
 tr.run:hover td { background:var(--raise); }
 tr.run.sel td { background:var(--raise); font-weight:600; }
 .mini { display:inline-flex; align-items:flex-end; gap:1px; height:16px; }
+.lane { display:grid; grid-template-columns:150px 1fr 78px; align-items:center;
+        gap:10px; margin-bottom:3px; }
+.lane .who { font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+             font-size:11.5px; color:var(--ink2); overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap; }
+.lane .track { position:relative; height:15px; background:var(--line);
+               border-radius:3px; overflow:hidden; }
+.lane .track i { position:absolute; top:0; bottom:0; border-radius:2px;
+                 min-width:2px; }
+.lane .pct { font-size:11px; color:var(--ink3); text-align:right;
+             font-variant-numeric:tabular-nums; }
+.flowrow { display:grid; grid-template-columns:auto 1fr auto; align-items:center;
+           gap:12px; margin-bottom:8px; font-size:13px; }
+.flowbar { height:12px; border-radius:3px; background:var(--done); }
 .mini i { width:3px; background:var(--done); border-radius:1px; display:block; }
 .scopebar { display:flex; align-items:center; gap:10px; background:var(--surface);
             border:1px solid var(--line); border-left:3px solid var(--accent);
@@ -419,6 +433,14 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
   <div class="row">
     <div class="card"><h2>Workers</h2><div class="scroll" id="workers"></div></div>
     <div class="card"><h2>Could not finish</h2><div class="scroll" id="failures"></div></div>
+  </div>
+  <div class="card wide" id="tlcard">
+    <h2>Who held what, when</h2>
+    <div class="scroll" id="timeline"></div>
+  </div>
+  <div class="card wide" id="flowcard" hidden>
+    <h2>What caused what</h2>
+    <div class="scroll" id="flow"></div>
   </div>
   <div class="card wide">
     <h2>Skills in use</h2>
@@ -803,6 +825,53 @@ function render(d) {
       </tr>`).join("")}</table>`
     : `<div class="empty">No worker has finished anything yet.</div>`;
 
+  // -- who held what, when. The question a fleet actually raises is not what
+  // caused what, but whether it was saturated and what held up the end. A
+  // time axis shows both; a node-link diagram shows neither.
+  const tl = d.timeline || {bars: [], lanes: []};
+  if (!tl.bars.length) {
+    $("#timeline").innerHTML =
+      `<div class="empty">Nothing has been claimed yet.</div>`;
+  } else {
+    const t0 = tl.from, wall = tl.wall || 1;
+    const byLane = {};
+    tl.bars.forEach(b => (byLane[b.worker] = byLane[b.worker] || []).push(b));
+    $("#timeline").innerHTML = tl.lanes.map(l => {
+      const bars = (byLane[l.worker] || []).map(b => {
+        const left = 100 * (b.start - t0) / wall;
+        const w = Math.max(0.15, 100 * (b.end - b.start) / wall);
+        return `<i style="left:${left.toFixed(3)}%;width:${w.toFixed(3)}%;
+          background:var(--${b.status})" title="${esc(b.name)} · ${b.status} · ${
+          dur(b.end - b.start)}"></i>`;
+      }).join("");
+      const busy = 100 * (1 - l.idle);
+      return `<div class="lane"><span class="who" title="${esc(l.worker)}${
+        l.spawned_by ? " (spawned by " + esc(l.spawned_by) + ")" : ""}">${
+        esc(l.worker)}</span>
+        <span class="track">${bars}</span>
+        <span class="pct" title="${l.units} units, ${dur(l.busy)} busy">${
+          busy.toFixed(0)}% busy</span></div>`;
+    }).join("")
+    + `<div class="legend"><span class="chip">${tl.lanes.length} worker(s) over ${
+        dur(wall)}</span>${tl.truncated
+        ? '<span class="chip">showing the first 4,000 units</span>' : ""}</div>`;
+  }
+
+  // -- lineage, aggregated to kinds. A forest of 400,000 individual chains is
+  // not a picture; three stages with counts on the edges is. Hidden entirely
+  // when nothing chains, rather than showing an empty box.
+  const fl = d.flow || [];
+  $("#flowcard").hidden = !fl.length;
+  if (fl.length) {
+    const mx = Math.max(...fl.map(f => f.units));
+    $("#flow").innerHTML = fl.map(f => `<div class="flowrow">
+      <span class="mono">${esc(f.from)} &rarr; ${esc(f.to)}</span>
+      <span><span class="flowbar" style="width:${100 * f.units / mx}%;display:block"></span></span>
+      <span class="muted">${f.units.toLocaleString()} unit(s)${
+        f.failed ? `, <span style="color:var(--failed)">${f.failed} failed</span>` : ""}</span>
+      </div>`).join("");
+  }
+
   const sk = d.skills || [];
   $("#skills").innerHTML = sk.length ? `<table><tr>
       <th style="width:3px"></th><th>skill</th><th>version</th><th>digest</th>
@@ -996,6 +1065,8 @@ def _payload(conn, run: str | None, *, projects: list[str] | None = None,
     """
     return {**leases.stats(conn, run=run),
             "runs": leases.runs(conn, limit=25),
+            "flow": leases.flow(conn, run=run),
+            "timeline": leases.timeline(conn, run=run),
             "skills": leases.skills(conn),
             "selected": run,
             "run_meta": leases.run(conn, run) if run else None,

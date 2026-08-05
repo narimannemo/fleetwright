@@ -122,6 +122,38 @@ That is the same corpus, interleaved between two models, which is the only
 comparison worth making — two models on two different sets of units are
 measuring the units, not the models.
 
+### Who held what, when
+
+One lane per worker, one bar per unit, time across the page. This is the panel
+that answers the question a fleet actually raises, which is not *what caused
+what* but **was it saturated, who sat idle, and what held up the end**:
+
+```
+session-a/agent-0   ████ ██████ ███ █████████ ████        92% busy
+session-b/agent-1   █    ██        █      ██             24% busy
+```
+
+Both workers did about the same number of units. One of them spent three
+quarters of the run waiting. No count of units shows that, and it is the number
+that decides whether more workers would have helped.
+
+Each lane shows the percentage of wall-clock it was busy, hover gives the unit
+and its duration, and colour is the unit's status.
+
+### What caused what
+
+Only shown when something actually chains, and **aggregated to kinds**. A
+forest of four hundred thousand individual lineages is not a picture;
+`extract -> audit -> gloss` with counts on the edges is.
+
+```
+extract -> audit    126 unit(s)
+audit   -> gloss     69 unit(s)
+```
+
+For a single unit, `superagentic lineage <unit_id>` walks the chain in both
+directions.
+
 ### Six tiles — *where does this stand?*
 
 Left, done, in flight, failed, throughput, ETA. The ETA is computed from the
