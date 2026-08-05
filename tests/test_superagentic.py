@@ -107,8 +107,8 @@ class TestTheBrief:
     def test_a_retried_unit_says_so_in_its_brief(self, conn):
         sa.define(conn, "x", instructions="do it")
         sa.add(conn, "x", ["u1"])
-        sa.claim(conn, "x", worker="a", lease=0.01)
-        time.sleep(0.05)
+        sa.claim(conn, "x", worker="a", lease=300)
+        expire(conn)
         assert "attempt 2" in sa.claim(conn, "x", worker="b")[0].brief()
 
     def test_redefining_reaches_workers_that_have_not_claimed_yet(self, conn):
@@ -320,8 +320,8 @@ class TestResults:
 
     def test_a_lost_lease_cannot_inject_follow_on_work(self, conn):
         sa.add(conn, "extract", ["p1"])
-        slow = sa.claim(conn, "extract", worker="slow", lease=0.01)[0]
-        time.sleep(0.05)
+        slow = sa.claim(conn, "extract", worker="slow", lease=300)[0]
+        expire(conn)
         sa.claim(conn, "extract", worker="fast")
         assert sa.finish(conn, slow.unit_id, worker="slow",
                          then={"audit": ["c1"]}) is False
@@ -329,14 +329,34 @@ class TestResults:
             "a worker that lost its lease must not enqueue off the back of it"
 
 
+def expire(conn, unit_id=None):
+    """Push a lease into the past, instead of sleeping until it gets there.
+
+    The tests used to claim with a 10ms lease and then assert things about
+    whether it had expired yet. On a shared CI runner, 10ms between two Python
+    statements is ordinary — GC, descheduling, a virus scanner opening the
+    SQLite file — so the suite failed on Windows twice in twelve releases and
+    passed on re-run with no change. Wall-clock is not a thing a test should
+    race against when the value is a column it can simply write.
+    """
+    sql = "UPDATE unit SET leased_until = ? WHERE status = 'leased'"
+    args = [time.time() - 1]
+    if unit_id:
+        sql += " AND unit_id = ?"
+        args.append(unit_id)
+    conn.execute(sql, args)
+    conn.commit()
+
+
 class TestFailure:
     """A lease is only worth having if these hold."""
 
     def test_a_crashed_workers_unit_comes_back(self, conn):
         sa.add(conn, "x", ["u1"])
-        assert sa.claim(conn, "x", worker="dies", lease=0.01)
+        # A long lease, so "still held" is a fact rather than a race.
+        assert sa.claim(conn, "x", worker="dies", lease=300)
         assert sa.claim(conn, "x", worker="b") == [], "still leased, correctly"
-        time.sleep(0.05)
+        expire(conn)
         # No daemon: the next claimer reclaims on the way in.
         again = sa.claim(conn, "x", worker="b")
         assert [u.name for u in again] == ["u1"]
@@ -344,8 +364,8 @@ class TestFailure:
 
     def test_a_lost_lease_cannot_be_closed_or_extended(self, conn):
         sa.add(conn, "x", ["u1"])
-        slow = sa.claim(conn, "x", worker="slow", lease=0.01)[0]
-        time.sleep(0.05)
+        slow = sa.claim(conn, "x", worker="slow", lease=300)[0]
+        expire(conn)
         sa.claim(conn, "x", worker="fast")
         assert sa.heartbeat(conn, [slow.unit_id], worker="slow") == 0
         assert sa.finish(conn, slow.unit_id, worker="slow") is False
@@ -353,16 +373,17 @@ class TestFailure:
 
     def test_a_heartbeat_keeps_a_slow_worker_from_being_reclaimed(self, conn):
         sa.add(conn, "x", ["u1"])
-        u = sa.claim(conn, "x", worker="slow", lease=0.05)[0]
-        sa.heartbeat(conn, [u.unit_id], worker="slow", lease=30)
-        time.sleep(0.08)
-        assert sa.claim(conn, "x", worker="other") == []
+        u = sa.claim(conn, "x", worker="slow", lease=1)[0]
+        expire(conn)                                   # the lease has run out
+        sa.heartbeat(conn, [u.unit_id], worker="slow", lease=300)
+        assert sa.claim(conn, "x", worker="other") == [], \
+            "a heartbeat must rescue a lease that had already lapsed"
 
     def test_a_poison_unit_is_retired_rather_than_re_leased_forever(self, conn):
         sa.add(conn, "x", ["bad"])
         for _ in range(3):
-            sa.claim(conn, "x", worker="w", lease=0.01)
-            time.sleep(0.02)
+            sa.claim(conn, "x", worker="w", lease=300)
+            expire(conn)
         assert sa.claim(conn, "x", worker="w") == []
         assert sa.progress(conn)["x"][sa.FAILED] == 1
         assert "out of attempts" in sa.failures(conn)[0]["note"]
@@ -457,8 +478,8 @@ class TestCLI:
     def test_done_on_a_lost_lease_exits_nonzero(self, tmp_path):
         db = str(tmp_path / "w.db")
         cli_main(["add", "x", "u1", "--db", db])
-        cli_main(["claim", "x", "--db", db, "--worker", "a", "--lease", "0.01"])
-        time.sleep(0.05)
+        cli_main(["claim", "x", "--db", db, "--worker", "a", "--lease", "300"])
+        expire(sa.connect(db))
         cli_main(["claim", "x", "--db", db, "--worker", "b"])
         assert cli_main(["done", "x:u1", "--db", db, "--worker", "a"]) == 1
         assert cli_main(["done", "x:u1", "--db", db, "--worker", "b"]) == 0
@@ -549,8 +570,8 @@ class TestMCP:
     def test_a_retried_unit_is_flagged_to_the_agent(self, tmp_path):
         s = self._server(tmp_path)
         sa.add(s.conn, "x", ["u1"])
-        s.claim_job({"kind": "x", "lease_seconds": 0.01})
-        time.sleep(0.05)
+        s.claim_job({"kind": "x", "lease_seconds": 300})
+        expire(s.conn)
         assert "warning" in s.claim_job({"kind": "x"})
 
     def test_status_shows_other_workers_not_this_one(self, tmp_path):
@@ -1466,3 +1487,94 @@ class TestCLIWiring:
         f.write_text("edited since registration", encoding="utf-8")
         assert cli_main(["skill-check", "--db", db]) == 1
         assert "CHANGED" in capsys.readouterr().out
+
+
+class TestShapeChecking:
+    """`returns` was prose. Now it is checked, and the checking must never
+    turn a legitimate prose description into a failure."""
+
+    def test_prose_returns_disables_checking(self):
+        from superagentic import shape
+        for prose in ("a sentence about what you found", "", None,
+                      "the number of claims"):
+            assert shape.parse(prose) is None
+            assert shape.describe(prose, "literally anything") == []
+
+    def test_bare_and_quoted_placeholders_both_parse(self):
+        """`<int>` and `"<string>"` are both natural to write. Quoting the
+        already-quoted one produced `""<string>""`, which fails to parse, so
+        every shape silently became 'no shape' and nothing was checked."""
+        from superagentic import shape
+        t = shape.parse('{"claims": <int>, "notes": "<string>"}')
+        assert t == {"claims": "<int>", "notes": "<string>"}
+
+    def test_the_failures_that_matter(self):
+        from superagentic import shape
+        t = '{"claims": <int>, "notes": "<string>"}'
+        assert shape.describe(t, "a bare string")
+        assert shape.describe(t, {"notes": "x"})            # missing key
+        assert shape.describe(t, {"claims": "12", "notes": "x"})  # wrong type
+
+    def test_extra_keys_are_allowed(self):
+        # Returning more than promised breaks nothing, and refusing it would
+        # punish the useful habit of including context.
+        from superagentic import shape
+        assert shape.describe('{"claims": <int>}',
+                              {"claims": 1, "why": "because"}) == []
+
+    def test_a_bool_is_not_an_int(self):
+        from superagentic import shape
+        assert shape.describe('{"n": <int>}', {"n": True})
+
+    def test_optional_keys(self):
+        from superagentic import shape
+        t = '{"claims": <int>, "tags?": ["<string>"]}'
+        assert shape.describe(t, {"claims": 1}) == []
+        assert shape.describe(t, {"claims": 1, "tags": ["a"]}) == []
+        assert shape.describe(t, {"claims": 1, "tags": ["a", 2]})
+
+    def test_every_problem_is_reported_at_once(self):
+        # An agent told about one problem at a time will redo the work twice.
+        from superagentic import shape
+        p = shape.describe('{"a": <int>, "b": <int>, "c": <int>}',
+                           {"a": "x", "b": "y"})
+        assert len(p) == 3
+
+    def test_the_cli_refuses_and_keeps_the_unit(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        cli_main(["define", "k", "--db", db, "--instructions", "go",
+                  "--done-when", "d", "--returns", '{"claims": <int>}'])
+        cli_main(["add", "k", "u", "--db", db])
+        cli_main(["claim", "k", "--db", db, "--worker", "w"])
+        with pytest.raises(SystemExit) as e:
+            cli_main(["finish", "k:u", "--db", db, "--worker", "w",
+                      "--result", '{"claims": "twelve"}'])
+        assert e.value.code == 2
+        err = capsys.readouterr().err
+        assert "expected int" in err and "still yours" in err
+        # Refused, not lost: the work can be handed back with the right shape.
+        assert sa.progress(sa.connect(db))["k"][sa.LEASED] == 1
+        assert cli_main(["finish", "k:u", "--db", db, "--worker", "w",
+                         "--result", '{"claims": 12}']) == 0
+
+    def test_no_check_is_an_escape_hatch(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["define", "k", "--db", db, "--instructions", "go",
+                  "--done-when", "d", "--returns", '{"claims": <int>}'])
+        cli_main(["add", "k", "u", "--db", db])
+        cli_main(["claim", "k", "--db", db, "--worker", "w"])
+        assert cli_main(["finish", "k:u", "--db", db, "--worker", "w",
+                         "--no-check", "--result", '"wrong"']) == 0
+
+    def test_mcp_reports_rather_than_raises(self, tmp_path):
+        from superagentic.mcp import Server
+        s = Server(tmp_path / "w.db")
+        s.define_kind({"kind": "k", "instructions": "go", "done_when": "d",
+                       "returns": '{"claims": <int>}'})
+        s.add_jobs({"kind": "k", "names": ["u"]})
+        u = s.claim_job({"kind": "k"})["units"][0]
+        bad = s.finish_job({"unit_id": u["unit_id"], "result": {"claims": "x"}})
+        assert bad["finished"] is False and bad["error"] == "result_shape"
+        assert "STILL YOURS" in bad["message"]
+        ok = s.finish_job({"unit_id": u["unit_id"], "result": {"claims": 1}})
+        assert ok["finished"] is True

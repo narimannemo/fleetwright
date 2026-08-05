@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, leases
+from . import __version__, leases, shape
 
 
 def _conn(a: argparse.Namespace):
@@ -279,14 +279,26 @@ def _read_result(a: argparse.Namespace):
 
 
 def _cmd_done(a: argparse.Namespace) -> int:
+    conn = _conn(a)
     result = _read_result(a)
-    kind_spec = leases.spec(_conn(a), a.unit_id.split(":", 1)[0].split("/")[-1])
-    if (result is not None and kind_spec and (kind_spec.get("returns") or "").strip()
-            .startswith("{") and not isinstance(result, dict)):
-        # Not validation: `returns` is prose, not a schema. But handing back a
-        # bare string against a declared object shape is worth one line.
-        print(f"warning: this kind declares returns {kind_spec['returns']!r} "
-              f"but the result is a {type(result).__name__}", file=sys.stderr)
+    if result is not None and not a.no_check:
+        row = conn.execute("SELECT kind FROM unit WHERE unit_id = ?",
+                           (a.unit_id,)).fetchone()
+        spec = leases.spec(conn, row["kind"]) if row else None
+        problems = shape.describe(spec.get("returns") if spec else None, result)
+        if problems:
+            # Refused, not warned. The unit stays leased, so the worker can fix
+            # the shape and finish again without losing the work — the same
+            # contract as malformed JSON. A warning would be ignored by exactly
+            # the callers this exists for.
+            print(f"the result does not match what {row['kind']!r} declares it "
+                  f"returns:", file=sys.stderr)
+            print(f"  returns: {spec['returns']}", file=sys.stderr)
+            for pr in problems[:10]:
+                print(f"  {pr}", file=sys.stderr)
+            print("  the unit is still yours. Fix the shape and finish again, "
+                  "or pass --no-check.", file=sys.stderr)
+            raise SystemExit(2)
     if leases.finish(_conn(a), a.unit_id, worker=a.worker, note=a.note,
                      result=result):
         print(f"done {a.unit_id}")
@@ -488,6 +500,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "large, since Linux caps one argument at 128 KB")
         s.add_argument("--note")
         s.add_argument("--worker")
+        s.add_argument("--no-check", action="store_true",
+                       help="skip the check against the kind's declared returns")
         s.set_defaults(fn=_cmd_done)
 
     s = common(sub.add_parser("fail", help="report a unit that could not be done"))

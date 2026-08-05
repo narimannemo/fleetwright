@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import leases
+from . import leases, shape
 
 PROTOCOL = "2024-11-05"
 
@@ -368,6 +368,20 @@ class Server:
         return out
 
     def finish_job(self, a: dict) -> dict:
+        if a.get("result") is not None:
+            row = self.conn.execute("SELECT kind FROM unit WHERE unit_id = ?",
+                                    (a["unit_id"],)).fetchone()
+            sp = leases.spec(self.conn, row["kind"]) if row else None
+            problems = shape.describe(sp.get("returns") if sp else None,
+                                      a["result"])
+            if problems:
+                return {"ok": False, "finished": False,
+                        "error": "result_shape",
+                        "returns": sp["returns"],
+                        "problems": problems[:10],
+                        "message": "Your result does not match the shape this "
+                                   "kind declares. The unit is STILL YOURS: fix "
+                                   "the shape and call finish_job again."}
         ok = leases.finish(self.conn, a["unit_id"], worker=self.worker,
                            note=a.get("note"), result=a.get("result"),
                            then=a.get("then"))

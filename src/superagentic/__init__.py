@@ -21,6 +21,7 @@ all, because nothing can tell a busy worker from a dead one. See
 deliberately does not give you — starting with exactly-once, which nothing can.
 """
 
+from . import shape
 from .leases import (
     DEFAULT_LEASE,
     DONE,
@@ -55,11 +56,11 @@ from .leases import (
     worker_prompt,
 )
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 __all__ = ["DEFAULT_LEASE", "DONE", "FAILED", "LEASED", "MAX_ATTEMPTS", "OPEN",
            "Unit", "add", "claim", "connect", "define", "fail", "failures",
            "finish", "heartbeat", "leased", "progress", "reclaim", "release",
            "register_skill", "resolve_skills", "results", "run", "runs",
            "skills", "spec", "start_run", "this_worker",
-           "unit_id", "units", "worker_prompt"]
+           "shape", "unit_id", "units", "worker_prompt"]

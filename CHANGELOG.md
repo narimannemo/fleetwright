@@ -5,6 +5,36 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.11.0] — 2026-08-05
+
+### Added
+
+- **`returns` is now checked.** It was prose, so a worker could hand back a
+  bare string against a declared object and be told nothing. The same text you
+  already write is now the check:
+
+  ```
+  {"claims": <int>, "notes": "<string>", "tags?": ["<string>"]}
+  ```
+
+  Not JSON Schema, deliberately: the audience is an agent reading a brief, and
+  the brief being the documentation *and* the contract is the point. Extra keys
+  are allowed; missing keys and wrong types are refused, **the unit stays
+  leased**, and the worker can fix the shape and finish again. `--no-check`
+  overrides. A `returns` written as a sentence disables checking, because a
+  sentence is a legitimate thing to write.
+
+### Fixed
+
+- **The Windows flake, diagnosed.** `test_a_crashed_workers_unit_comes_back`
+  claimed with a **10 millisecond** lease and then asserted the unit was still
+  held. On a shared runner, 10ms between two Python statements is ordinary, and
+  when it elapsed the lease expired, `reclaim()` returned the unit, and the
+  assertion failed. That is why it failed twice in twelve releases and passed
+  on re-run with no change.
+  Every timing test now writes `leased_until` into the past instead of sleeping
+  toward it. No test races the wall clock, and the suite is 20% faster.
+
 ## [0.10.0] — 2026-08-05
 
 Everything here came from using superagentic on real work for the first time:
