@@ -2567,3 +2567,112 @@ class TestRunAsAModule:
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
         assert (tmp_path / "s.toml").exists()
+
+
+class TestEveryColourIsReal:
+    """`var(--card)` when the token is called `--raise` is not a subtle bug.
+
+    A CSS declaration naming an undefined custom property is DROPPED, and an
+    SVG `<rect>` or `<text>` with no fill is BLACK. So one wrong token name
+    turned the whole pipeline diagram into black boxes with invisible labels
+    on a black ground, and nothing errored anywhere: not the server, not the
+    console, not the tests. The page still returned 200 and every panel was
+    still in the HTML.
+    """
+
+    def _css(self):
+        from superagentic import dashboard
+        return dashboard.page(Path("x.db"))
+
+    def test_no_declaration_names_a_token_that_does_not_exist(self):
+        css = self._css()
+        defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", css))
+        used = set(re.findall(r"var\((--[a-z0-9-]+)", css))
+        missing = sorted(used - defined)
+        assert not missing, (
+            "used but never defined, so the declaration is dropped and an SVG "
+            "fill falls back to black: " + ", ".join(missing))
+
+    def test_every_status_has_a_colour(self):
+        """The diagram builds fills as `var(--${status})` from the status
+        list, so a new status would be an invisible segment."""
+        css = self._css()
+        for status in sa.STATUSES:
+            assert f"--{status}:" in css, f"no --{status} colour"
+
+
+class TestGraph:
+    """Nodes and edges, laid out in columns rather than thrown at a physics
+    simulation. A pipeline has a direction and a force layout discards it."""
+
+    def _pipeline(self, tmp_path, chain):
+        conn = sa.connect(str(tmp_path / "g.db"))
+        kinds = {k for pair in chain for k in pair}
+        for k in kinds:
+            sa.define(conn, k, "x", done_when="y")
+        run = sa.start_run(conn, label="r")
+        sa.add(conn, chain[0][0], ["a"], run=run)
+        while True:
+            got = sa.claim(conn, worker="w0", n=1)
+            if not got:
+                break
+            u = got[0]
+            nxt = {}
+            for src, dst in chain:
+                if src == u.kind:
+                    nxt.setdefault(dst, []).append(f"{u.name}-{dst}")
+            sa.finish(conn, u.unit_id, worker="w0", then=nxt or None)
+        return conn
+
+    def test_depth_is_the_longest_path_not_the_shortest(self, tmp_path):
+        """A diamond: `d` must sit past `b` and `c`, not beside them, or the
+        arrows point backwards into their own column."""
+        conn = self._pipeline(tmp_path, [("a", "b"), ("a", "c"),
+                                         ("b", "d"), ("c", "d")])
+        depth = {n["kind"]: n["depth"] for n in sa.graph(conn)["nodes"]}
+        assert depth == {"a": 0, "b": 1, "c": 1, "d": 2}
+
+    def test_a_long_branch_pushes_the_merge_right(self, tmp_path):
+        conn = self._pipeline(tmp_path, [("a", "b"), ("b", "c"),
+                                         ("c", "d"), ("a", "d")])
+        depth = {n["kind"]: n["depth"] for n in sa.graph(conn)["nodes"]}
+        assert depth["d"] == 3, "the short path a->d decided the column"
+
+    def test_a_cycle_terminates(self, tmp_path):
+        """Nothing stops an `audit` kind enqueueing back into `extract`, and a
+        layout that hangs on that is worse than one that looks slightly odd."""
+        conn = sa.connect(str(tmp_path / "c.db"))
+        for k in ("a", "b"):
+            sa.define(conn, k, "x", done_when="y")
+        sa.add(conn, "a", ["one"])
+        u = sa.claim(conn, "a", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w", then={"b": ["two"]})
+        u = sa.claim(conn, "b", worker="w")[0]
+        sa.finish(conn, u.unit_id, worker="w", then={"a": ["three"]})
+        g = sa.graph(conn)                      # must return, not spin
+        assert {n["kind"] for n in g["nodes"]} == {"a", "b"}
+        assert len(g["edges"]) == 2
+
+    def test_the_counts_on_a_node_add_up(self, tmp_path):
+        conn = self._pipeline(tmp_path, [("a", "b")])
+        for n in sa.graph(conn)["nodes"]:
+            total = sum(n[k] for k in
+                        ("done", "failed", "leased", "open", "cancelled"))
+            assert total == n["units"], f"{n['kind']} does not add up"
+
+    def test_no_edges_means_no_picture(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "flat.db"))
+        sa.define(conn, "a", "x", done_when="y")
+        sa.add(conn, "a", ["one", "two"])
+        g = sa.graph(conn)
+        assert g["edges"] == []
+        assert g["nodes"][0]["depth"] == 0
+
+    def test_a_run_scopes_it(self, tmp_path):
+        conn = self._pipeline(tmp_path, [("a", "b")])
+        other = sa.start_run(conn, label="other")
+        sa.add(conn, "a", ["elsewhere"], run=other)
+        assert sa.graph(conn, run=other)["nodes"] == [
+            {"kind": "a", "units": 1, "done": 0, "failed": 0, "leased": 0,
+             "open": 1, "cancelled": 0, "cost": 0.0, "mean_seconds": None,
+             "depth": 0}]

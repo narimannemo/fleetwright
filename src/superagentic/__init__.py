@@ -43,6 +43,7 @@ from .leases import (
     failures,
     finish,
     flow,
+    graph,
     heartbeat,
     iter_results,
     kind_digest,
@@ -82,12 +83,12 @@ def skill_text() -> str:
     return (Path(__file__).parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
-__version__ = "0.19.1"
+__version__ = "0.20.0"
 
 __all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
            "Unit", "add", "brief_for", "cancel", "claim", "connect", "define", "fail", "failures",
-           "finish", "flow", "heartbeat", "iter_results", "kind_digest",
+           "finish", "flow", "graph", "heartbeat", "iter_results", "kind_digest",
            "kind_versions", "leased", "lineage", "progress", "reclaim", "release",
            "outstanding", "register_skill", "resolve_skills", "results", "retry",
            "run", "runs", "state", "timeline",

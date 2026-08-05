@@ -322,6 +322,23 @@ tr.run.sel td { background:var(--raise); font-weight:600; }
                  min-width:2px; }
 .lane .pct { font-size:11px; color:var(--ink3); text-align:right;
              font-variant-numeric:tabular-nums; }
+/* The pipeline diagram. SVG inherits none of the page's colours, so every
+   fill and stroke is named here: an unstyled <text> or <path> is BLACK, which
+   on a dark ground is not a faint bug but an invisible one. */
+#dag { padding:2px 0 12px }
+#dag svg { display:block; max-width:100%; height:auto }
+#dag .nodebox { fill:var(--raise); stroke:var(--line2); stroke-width:1 }
+#dag .nodebox:hover { stroke:var(--accent); stroke-width:1.5 }
+#dag .nlabel { fill:var(--ink);
+  font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace }
+#dag .nsub { fill:var(--ink3); font:11px system-ui,-apple-system,sans-serif }
+#dag .edge { fill:none; stroke:var(--line2); stroke-linecap:round; opacity:.9 }
+#dag .edge:hover { stroke:var(--accent); opacity:1 }
+#dag .arrow { fill:var(--line2); stroke:none }
+/* An invisible fat copy of each edge, so a 1px line is still hoverable. */
+#dag .hit { fill:none; stroke:transparent; cursor:default }
+#dag .elabel { fill:var(--ink3); text-anchor:middle;
+  font:10.5px system-ui,-apple-system,sans-serif }
 .flowrow { display:grid; grid-template-columns:auto 1fr auto; align-items:center;
            gap:12px; margin-bottom:8px; font-size:13px; }
 .flowbar { height:12px; border-radius:3px; background:var(--done); }
@@ -440,6 +457,7 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
   </div>
   <div class="card wide" id="flowcard" hidden>
     <h2>What caused what</h2>
+    <div class="scroll"><div id="dag"></div></div>
     <div class="scroll" id="flow"></div>
   </div>
   <div class="card wide">
@@ -458,6 +476,97 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 <script>
 const DATA = __DATA__;          // null when served live
 const $ = s => document.querySelector(s);
+
+// -- The pipeline as nodes and edges. LAYERED, not force-directed: a pipeline
+// has a direction, and a force layout throws it away -- the same data lands
+// somewhere different on every load, and "which way does the work flow" stops
+// being answerable at a glance. Node height is unit count, edge width is how
+// many units one kind caused in another, so the shape carries the numbers
+// rather than decorating them. One node per KIND: 255 unit nodes is a
+// hairball and 400,000 is a dead tab. The exact counts are in the list
+// underneath, which is also the reading that does not depend on colour.
+function drawDag(g) {
+  const el = $("#dag");
+  if (!g.nodes || !g.nodes.length) { el.innerHTML = ""; return; }
+  const cols = {};
+  g.nodes.forEach(n => (cols[n.depth] = cols[n.depth] || []).push(n));
+  const depths = Object.keys(cols).map(Number).sort((a, b) => a - b);
+
+  const NW = 152, GAP = 18, COLGAP = 94, PAD = 8;
+  const maxUnits = Math.max(...g.nodes.map(n => n.units), 1);
+  const h = n => Math.round(58 + 52 * Math.sqrt(n.units / maxUnits));
+
+  const place = {}; let tallest = 0;
+  const colHeight = dp => cols[dp].reduce((a, n) => a + h(n), 0)
+                        + GAP * (cols[dp].length - 1);
+  depths.forEach(dp => { tallest = Math.max(tallest, colHeight(dp)); });
+  depths.forEach((dp, ci) => {
+    let y = PAD + (tallest - colHeight(dp)) / 2;
+    cols[dp].forEach(n => {
+      place[n.kind] = {x: PAD + ci * (NW + COLGAP), y, w: NW, h: h(n)};
+      y += h(n) + GAP;
+    });
+  });
+  const W = PAD * 2 + depths.length * NW + (depths.length - 1) * COLGAP;
+  const H = PAD * 2 + tallest;
+
+  const maxEdge = Math.max(...g.edges.map(e => e.units), 1);
+  const edges = g.edges.map(e => {
+    const a = place[e.from], b = place[e.to];
+    if (!a || !b) return "";
+    const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
+    const c = Math.max(30, (x2 - x1) / 2);
+    const wid = 1.2 + 9 * Math.sqrt(e.units / maxEdge);
+    // The head is a plain polygon, not a <marker>. Markers scale with
+    // stroke-width by default, so a fat edge grew a head the size of a node,
+    // and `markerUnits` did not survive being parsed out of innerHTML. Every
+    // curve is built to arrive horizontally, including a backward one, so the
+    // heading is known and does not need computing.
+    return `<path class="edge" stroke-width="${wid.toFixed(1)}"
+      d="M${x1},${y1} C${x1 + c},${y1} ${x2 - c},${y2} ${x2 - 9},${y2}"
+      ></path>
+      <path class="arrow" d="M${x2 - 10},${y2 - 4.5} L${x2 - 1},${y2} L${
+      x2 - 10},${y2 + 4.5} z"></path>
+      <path class="hit" stroke-width="${Math.max(wid, 12).toFixed(1)}"
+      d="M${x1},${y1} C${x1 + c},${y1} ${x2 - c},${y2} ${x2 - 9},${y2}"
+      ><title>${esc(e.from)} caused ${
+      e.units.toLocaleString()} ${esc(e.to)} unit(s)${
+      e.failed ? ", " + e.failed + " failed" : ""}</title></path>
+      <text class="elabel" x="${(x1 + x2) / 2}" y="${
+      (y1 + y2) / 2 - wid / 2 - 6}">${e.units.toLocaleString()}</text>`;
+  }).join("");
+
+  const STATUS = ["done", "leased", "open", "failed", "cancelled"];
+  const nodes = g.nodes.map(n => {
+    const p = place[n.kind];
+    let sx = p.x;
+    const strip = STATUS.map(k => {
+      const v = n[k] || 0;
+      if (!v) return "";
+      const w = p.w * v / Math.max(n.units, 1);
+      const r = `<rect x="${sx.toFixed(2)}" y="${p.y + p.h - 5}"
+        width="${w.toFixed(2)}" height="5" fill="var(--${k})"></rect>`;
+      sx += w;
+      return r;
+    }).join("");
+    return `<g><rect class="nodebox" x="${p.x}" y="${p.y}" width="${p.w}"
+        height="${p.h}" rx="6"><title>${esc(n.kind)}: ${
+        n.units.toLocaleString()} unit(s), ${n.done} done${
+        n.failed ? ", " + n.failed + " failed" : ""}${
+        n.cost ? ", $" + n.cost.toFixed(3) : ""}</title></rect>
+      <text class="nlabel" x="${p.x + 12}" y="${p.y + 23}">${esc(n.kind)}</text>
+      <text class="nsub" x="${p.x + 12}" y="${p.y + 40}">${
+        n.units.toLocaleString()} unit(s)</text>
+      <text class="nsub" x="${p.x + 12}" y="${p.y + 55}">${
+        n.mean_seconds ? dur(n.mean_seconds) + " each" : ""}</text>
+      ${strip}</g>`;
+  }).join("");
+
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"
+    role="img" aria-label="the pipeline: one node per kind of work">
+    ${edges}${nodes}</svg>`;
+}
+
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
@@ -862,6 +971,7 @@ function render(d) {
   // when nothing chains, rather than showing an empty box.
   const fl = d.flow || [];
   $("#flowcard").hidden = !fl.length;
+  if (fl.length) drawDag(d.graph || {nodes: [], edges: [], depths: 0});
   if (fl.length) {
     const mx = Math.max(...fl.map(f => f.units));
     $("#flow").innerHTML = fl.map(f => `<div class="flowrow">
@@ -1066,6 +1176,7 @@ def _payload(conn, run: str | None, *, projects: list[str] | None = None,
     return {**leases.stats(conn, run=run),
             "runs": leases.runs(conn, limit=25),
             "flow": leases.flow(conn, run=run),
+            "graph": leases.graph(conn, run=run),
             "timeline": leases.timeline(conn, run=run),
             "skills": leases.skills(conn),
             "selected": run,

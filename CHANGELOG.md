@@ -5,6 +5,36 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.20.0] — 2026-08-06
+
+### Added
+
+- **The pipeline drawn as nodes and edges**, in the "what caused what" panel,
+  and `superagentic.graph()` behind it. Node height is unit count, edge width
+  is how many units one kind caused in another, and the strip along each node's
+  bottom is its status mix, so the shape carries the numbers rather than
+  decorating them.
+
+  **Laid out in columns, not force-directed.** A pipeline has a direction and a
+  force layout throws it away: the same data lands somewhere different on every
+  load. A node's column is the longest path to it, so a merge sits past the
+  longest branch feeding it rather than beside it. Cycles terminate rather than
+  spin, because nothing stops an `audit` kind enqueueing back into `extract`.
+
+  **One node per kind, not per unit**, for the same reason the flow list was:
+  255 unit nodes is a hairball and 400,000 is a dead tab. The exact counts stay
+  in the list underneath, which is also the reading that does not depend on
+  colour.
+
+### Notes
+
+- **A test now fails if any CSS declaration names a token that does not
+  exist.** The first version of the diagram used `var(--card)` where the token
+  is called `--raise`. A declaration naming an undefined custom property is
+  dropped, and an SVG rect or text with no fill is **black**, so the whole
+  diagram rendered as black boxes with invisible labels on a black ground while
+  the server returned 200, the console stayed clean and every test passed.
+
 ## [0.19.1] — 2026-08-06
 
 Both found by opening the dashboard and looking at it.

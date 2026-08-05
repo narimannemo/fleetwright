@@ -142,14 +142,37 @@ and its duration, and colour is the unit's status.
 
 ### What caused what
 
-Only shown when something actually chains, and **aggregated to kinds**. A
-forest of four hundred thousand individual lineages is not a picture;
-`extract -> audit -> gloss` with counts on the edges is.
+The pipeline as nodes and edges, shown only when something actually chains.
+Node height is unit count, edge width is how many units one kind caused in
+another, and the strip along the bottom of each node is its status mix, so the
+shape carries the numbers rather than decorating them:
 
 ```
-extract -> audit    126 unit(s)
-audit   -> gloss     69 unit(s)
+                 +---------+
+            40   | extract |   40
+          +----->|  40u    |----+
++------+  |      +---------+    |    +-------+  80   +---------+
+| scan |--+                     +--->| audit |------>| publish |
+|  40u |  |      +---------+    |    |  80u  |       |   80u   |
++------+  +----->|  gloss  |----+    +-------+       +---------+
+            40   |   40u   |   40
+                 +---------+
 ```
+
+**Laid out in columns, not force-directed.** A pipeline has a direction, and a
+force layout throws it away: the same data lands somewhere different on every
+load, and "which way does the work flow" stops being answerable at a glance.
+A node's column is the *longest* path to it, so a stage sits to the right of
+everything that can feed it however many hops away that is. Cycles are
+tolerated rather than assumed away, since nothing stops an `audit` kind
+enqueueing back into `extract`.
+
+**One node per kind, not per unit.** 255 unit nodes is a hairball and 400,000
+is a dead browser tab. For a single unit, `superagentic lineage <unit_id>`
+walks its own chain in both directions.
+
+The exact counts stay in a list underneath, which is also the reading that does
+not depend on colour.
 
 For a single unit, `superagentic lineage <unit_id>` walks the chain in both
 directions.

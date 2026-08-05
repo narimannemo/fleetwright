@@ -1568,6 +1568,74 @@ def flow(conn: sqlite3.Connection, *, run: str | None = None) -> list[dict]:
              "done": r["done"] or 0, "failed": r["failed"] or 0} for r in rows]
 
 
+def graph(conn: sqlite3.Connection, *, run: str | None = None) -> dict:
+    """The pipeline as nodes and edges: one node per kind, laid out in columns.
+
+    Drawn LAYERED, not force-directed. A pipeline has a direction, and a force
+    layout throws that away: the same data lands in a different place on every
+    load, and "which way does the work flow" stops being answerable at a
+    glance. Depth is the longest path to a node, so a kind sits to the right of
+    everything that can feed it however many hops away that is.
+
+    One node per KIND, not per unit. Two hundred and fifty-five unit nodes is a
+    hairball, and four hundred thousand is a browser tab that dies. The counts
+    live on the nodes and the edges instead, which is the thing worth reading:
+    where the work piles up and where it stops.
+
+    Cycles are tolerated rather than assumed away. Nothing prevents an `audit`
+    kind from enqueueing back into `extract`, and a layout that hangs on that
+    is worse than one that lays it out slightly oddly.
+    """
+    edges = flow(conn, run=run)
+    where, args = "", []
+    if run:
+        where, args = " WHERE run_id = ?", [run]
+    rows = conn.execute(
+        f"""SELECT kind,
+                   count(*) AS units,
+                   sum(status = 'done')      AS done,
+                   sum(status = 'failed')    AS failed,
+                   sum(status = 'leased')    AS leased,
+                   sum(status = 'open')      AS open,
+                   sum(status = 'cancelled') AS cancelled,
+                   sum(cost) AS cost,
+                   avg(CASE WHEN status = 'done' AND claimed_at IS NOT NULL
+                            THEN updated_at - claimed_at END) AS mean
+              FROM unit{where} GROUP BY kind""", args).fetchall()
+    nodes = {r["kind"]: {
+        "kind": r["kind"], "units": r["units"],
+        "done": r["done"] or 0, "failed": r["failed"] or 0,
+        "leased": r["leased"] or 0, "open": r["open"] or 0,
+        "cancelled": r["cancelled"] or 0,
+        "cost": r["cost"] or 0.0,
+        "mean_seconds": r["mean"],
+    } for r in rows}
+
+    # Longest-path layering. Repeated relaxation rather than a topological
+    # sort, because a topological sort has to decide what to do about a cycle
+    # and this does not: it stops after one pass per node and whatever is left
+    # is drawn where it landed.
+    depth = {k: 0 for k in nodes}
+    for _ in range(len(nodes)):
+        moved = False
+        for e in edges:
+            if e["from"] in depth and e["to"] in depth:
+                want = depth[e["from"]] + 1
+                if depth[e["to"]] < want:
+                    depth[e["to"]] = want
+                    moved = True
+        if not moved:
+            break
+    for k, d in depth.items():
+        nodes[k]["depth"] = d
+    return {
+        "nodes": sorted(nodes.values(),
+                        key=lambda n: (n["depth"], -n["units"], n["kind"])),
+        "edges": edges,
+        "depths": (max(depth.values()) + 1) if depth else 0,
+    }
+
+
 def timeline(conn: sqlite3.Connection, *, run: str | None = None,
              limit: int = 4000) -> dict:
     """Who held what, when. One lane per worker, one bar per unit.
