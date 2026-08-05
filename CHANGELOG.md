@@ -5,6 +5,29 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.19.0] — 2026-08-05
+
+### Added
+
+- **`superagentic finish --then '{"audit": ["p1-c0"]}'`.** Staged work has been
+  in the library since the beginning and in the skill's advice since it was
+  written, and there was no flag for it, so no shell worker could ever do what
+  the skill told it to do. Refused with the unit still yours if the JSON is
+  malformed or names a kind nothing defined, because a worker handed a bare
+  name with no instructions does the wrong work confidently.
+- **`--max-attempts` on `claim` and `fail`**, which the library has always
+  taken and the CLI hardcoded to 3.
+
+### Notes
+
+- **A test now fails if any library keyword has no way to be set from a
+  command.** Three separate releases shipped a feature that existed in the
+  library and not on the CLI: `add --run` parsed and never read, `spawned_by`
+  stored and drawn with no flag to set it, and `--then` documented in the skill
+  and absent from the parser. All three passed every test, because the tests
+  call the library and the workers use the shell. Exceptions are listed by name
+  with the reason each is fine.
+
 ## [0.18.1] — 2026-08-05
 
 Both of these were found by installing 0.18.0 from PyPI and using it, not by

@@ -281,6 +281,20 @@ A prompt pasted out of a README drifts from the kind it was written for, and
 nothing tells you when it has. A test asserts every command the prompt prints
 actually parses against the real CLI.
 
+### `finish --then`
+
+```bash
+superagentic finish "$UNIT" --then '{"audit": ["p001-c0", "p001-c1"]}'
+```
+
+The only way one unit causes another to exist. The new units inherit the
+finishing unit's run and record it as their parent, so `wait --run` covers the
+pipeline instead of returning when stage one drains.
+
+Refused, with the unit still yours, if the JSON is malformed or names a kind
+nothing has defined. Enqueueing into an undefined kind hands its worker a bare
+name, and a worker with no instructions does the wrong work confidently.
+
 ### `claim --spawned-by`
 
 ```bash

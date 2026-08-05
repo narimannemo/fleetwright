@@ -8,6 +8,7 @@ race the same file. Those have their own tests below and they are the point.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import subprocess
@@ -2398,3 +2399,97 @@ class TestSpawnedBy:
         conn = sa.connect(db)
         assert conn.execute(
             "SELECT spawned_by FROM unit").fetchone()["spawned_by"] == "session-b"
+
+
+class TestNothingIsLibraryOnly:
+    """Every library option a worker needs must be reachable from the shell.
+
+    This has now shipped three times: `add --run` was parsed and never read,
+    `spawned_by` was stored and drawn with no flag to set it, and `finish
+    --then` did not exist while the skill told shell workers to use it. Each
+    one passed every test, because the tests call the library and the workers
+    do not.
+    """
+
+    #: Reachable under another name, or deliberately not on the CLI. Anything
+    #: not listed here must have a flag.
+    ELSEWHERE = {
+        ("claim", "n"): "-n",
+        ("add", "parent"): "set by finish --then; not a thing to type",
+        ("define", "skills"): "--skill, repeated",
+        ("retry", "names"): "positional",
+        ("cancel", "names"): "positional",
+        ("skill", "content"): "--source, which is also hashed",
+        ("start", "started_by"): "--by",
+        ("start", "run_id"): "--id",
+    }
+
+    def test_every_keyword_can_be_set_from_the_command_line(self):
+        import superagentic.leases as L
+        pairs = [("add", L.add), ("claim", L.claim), ("finish", L.finish),
+                 ("fail", L.fail), ("release", L.release), ("define", L.define),
+                 ("retry", L.retry), ("cancel", L.cancel),
+                 ("skill", L.register_skill), ("start", L.start_run)]
+        subs = cli.build_parser()._subparsers._group_actions[0].choices
+        gaps = []
+        for name, fn in pairs:
+            have = {o for a in subs[name]._actions for o in a.option_strings}
+            for prm in inspect.signature(fn).parameters.values():
+                if prm.kind is not prm.KEYWORD_ONLY:
+                    continue
+                if prm.name in ("conn", "worker", "force"):
+                    continue
+                if "--" + prm.name.replace("_", "-") in have:
+                    continue
+                if (name, prm.name) in self.ELSEWHERE:
+                    continue
+                gaps.append(f"{name}(): {prm.name}")
+        assert not gaps, (
+            "reachable from the library but not from any command, so a shell "
+            "worker cannot use it: " + ", ".join(gaps))
+
+
+class TestThenFromTheShell:
+
+    def _setup(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        for k in ("ex", "audit"):
+            cli_main(["define", k, "--db", db, "--instructions", "x",
+                      "--done-when", "y"])
+        run = sa.start_run(sa.connect(db), label="r")
+        cli_main(["add", "ex", "--db", db, "--run", run, "p1"])
+        cli_main(["claim", "ex", "--db", db, "--worker", "w0"])
+        return db, run
+
+    def test_the_next_stage_inherits_the_run_and_the_parent(self, tmp_path):
+        db, run = self._setup(tmp_path)
+        assert cli_main(["finish", f"{run}/ex:p1", "--db", db, "--worker", "w0",
+                         "--then", '{"audit": ["p1-c0"]}']) == 0
+        conn = sa.connect(db)
+        row = conn.execute(
+            "SELECT run_id, parent_unit_id FROM unit WHERE kind = 'audit'"
+        ).fetchone()
+        assert row["run_id"] == run, "the second stage fell out of the run"
+        assert row["parent_unit_id"] == f"{run}/ex:p1"
+
+    def test_an_undefined_kind_is_refused_and_the_unit_stays_yours(self, tmp_path):
+        """Enqueueing into a kind with no instructions hands a worker a bare
+        name, and reporting success while doing it loses the stage quietly."""
+        db, run = self._setup(tmp_path)
+        with pytest.raises(SystemExit) as e:
+            cli_main(["finish", f"{run}/ex:p1", "--db", db, "--worker", "w0",
+                      "--then", '{"nosuch": ["a"]}'])
+        assert e.value.code == 2
+        conn = sa.connect(db)
+        assert conn.execute("SELECT status FROM unit WHERE kind = 'ex'"
+                            ).fetchone()["status"] == "leased"
+
+    def test_malformed_then_does_not_finish_the_unit(self, tmp_path):
+        db, run = self._setup(tmp_path)
+        with pytest.raises(SystemExit) as e:
+            cli_main(["finish", f"{run}/ex:p1", "--db", db, "--worker", "w0",
+                      "--then", "{audit: p1}"])
+        assert e.value.code == 2
+        conn = sa.connect(db)
+        assert conn.execute("SELECT status FROM unit WHERE kind = 'ex'"
+                            ).fetchone()["status"] == "leased"

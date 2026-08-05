@@ -167,6 +167,25 @@ The brief then tells the worker to **fail rather than improvise** if it cannot
 load one. A unit done without its tools looks finished, which is worse than one
 left undone.
 
+## Stages: work that produces more work
+
+A unit that is not independent is not a unit. But a unit that *produces* the
+next stage is fine, and the worker enqueues it as it finishes:
+
+```bash
+superagentic finish "$UNIT" --db "$DB" --worker w0 \
+  --result '{"claims": 3}' \
+  --then '{"audit": ["p001-c0", "p001-c1", "p001-c2"]}'
+```
+
+The new units inherit this unit's run and record it as their parent, so `wait
+--run` covers the whole pipeline rather than returning when stage one drains,
+and `superagentic lineage <unit_id>` shows what caused what.
+
+Define the second kind **before** anything finishes into it. A `--then` naming
+an undefined kind is refused and the unit stays yours, because a worker handed
+a bare name with no instructions does the wrong work confidently.
+
 ## Over MCP instead of the shell
 
 If `superagentic serve` is wired into the MCP config, the same flow is tools
@@ -192,4 +211,4 @@ rather than commands. `start_run`, `register_skill`, `define_kind`, `add_jobs`,
 - **Relative paths in `--meta`.** Workers may run elsewhere.
 - **Trusting the agents' final reports.** Check the database.
 - **Using it for sequential work.** Units must be independent. For stages, a
-  finishing worker enqueues the next with `then={"audit": [...]}`.
+  finishing worker enqueues the next as it finishes (see below).

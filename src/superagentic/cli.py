@@ -302,6 +302,7 @@ def _cmd_claim(a: argparse.Namespace) -> int:
     worker = a.worker or leases.this_worker()
     got = leases.claim(_conn(a), a.kind, worker=worker, lease=a.lease, n=a.n,
                        run=a.run,
+                       max_attempts=a.max_attempts,
                        model=a.model or os.environ.get("SUPERAGENTIC_MODEL"),
                        spawned_by=a.spawned_by
                        or os.environ.get("SUPERAGENTIC_SPAWNED_BY"))
@@ -379,10 +380,36 @@ def _cmd_done(a: argparse.Namespace) -> int:
             print("  the unit is still yours. Fix the shape and finish again, "
                   "or pass --no-check.", file=sys.stderr)
             raise SystemExit(2)
+    then = None
+    if a.then:
+        # Same contract as a malformed --result: refuse, keep the lease, say
+        # what is wrong. Enqueueing nothing while reporting success would lose
+        # a whole stage silently.
+        try:
+            then = json.loads(a.then)
+        except json.JSONDecodeError as e:
+            print(f"--then is not valid JSON: {e}", file=sys.stderr)
+            print('  expected {"kind": ["name", ...]}; the unit is still yours.',
+                  file=sys.stderr)
+            raise SystemExit(2) from None
+        if not isinstance(then, dict) or not all(
+                isinstance(v, list) for v in then.values()):
+            print('--then must be {"kind": ["name", ...]}', file=sys.stderr)
+            print("  the unit is still yours.", file=sys.stderr)
+            raise SystemExit(2)
+        unknown = [k for k in then if not leases.spec(conn, k)]
+        if unknown:
+            print(f"--then names undefined kind(s): {', '.join(unknown)}",
+                  file=sys.stderr)
+            print("  `superagentic define` them first; a unit with no "
+                  "instructions gives its worker a bare name.", file=sys.stderr)
+            raise SystemExit(2)
     if leases.finish(conn, a.unit_id, worker=a.worker, note=a.note,
                      result=result, tokens_in=a.tokens_in,
-                     tokens_out=a.tokens_out, cost=a.cost):
+                     tokens_out=a.tokens_out, cost=a.cost, then=then):
         print(f"done {a.unit_id}")
+        for kind, names in (then or {}).items():
+            print(f"  queued {len(names)} {kind}")
         return 0
     print(f"not yours — {a.unit_id}'s lease expired and another worker holds it",
           file=sys.stderr)
@@ -390,7 +417,8 @@ def _cmd_done(a: argparse.Namespace) -> int:
 
 
 def _cmd_fail(a: argparse.Namespace) -> int:
-    if leases.fail(_conn(a), a.unit_id, note=a.note, worker=a.worker):
+    if leases.fail(_conn(a), a.unit_id, note=a.note, worker=a.worker,
+                   max_attempts=a.max_attempts):
         print(f"failed {a.unit_id} — {a.note}")
         return 0
     print(f"not yours — {a.unit_id}", file=sys.stderr)
@@ -731,6 +759,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-n", type=int, default=1, help="take a batch")
     s.add_argument("--json", action="store_true")
     s.add_argument("--run", help="take work only from this run")
+    s.add_argument("--max-attempts", type=int, default=leases.MAX_ATTEMPTS,
+                   help="a unit handed out this many times is left failed "
+                        "rather than claimed again")
     s.add_argument("--model", help="what you are, e.g. claude-opus-5. Recorded "
                                    "as declared -- nothing verifies it. "
                                    "SUPERAGENTIC_MODEL also works.")
@@ -764,6 +795,14 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--worker")
         s.add_argument("--no-check", action="store_true",
                        help="skip the check against the kind's declared returns")
+        # The only way one unit causes another to exist, and until now it was
+        # reachable from the library alone -- while the skill told shell
+        # workers to use it.
+        s.add_argument("--then", metavar="JSON",
+                       help='enqueue the next stage as this one finishes, e.g. '
+                            '\'{"audit": ["p1-c0", "p1-c1"]}\'. They inherit '
+                            "this unit's run and record it as their parent, so "
+                            "`wait --run` covers them and `lineage` finds them.")
         # Declared, not measured. Nothing here can observe a model's usage.
         s.add_argument("--tokens-in", type=int, metavar="N")
         s.add_argument("--tokens-out", type=int, metavar="N")
@@ -776,6 +815,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("unit_id")
     s.add_argument("--note", required=True, help="why; it is kept")
     s.add_argument("--worker")
+    s.add_argument("--max-attempts", type=int, default=leases.MAX_ATTEMPTS,
+                   help="how many hand-outs before this stays failed rather "
+                        "than returning to the queue")
     s.set_defaults(fn=_cmd_fail)
 
     s = common(sub.add_parser("release", help="hand a unit back, no attempt burned"))
