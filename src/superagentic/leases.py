@@ -1086,6 +1086,7 @@ def runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
                sum(u.status = 'leased') AS leased,
                sum(u.attempts > 1)      AS retried,
                max(u.updated_at)        AS last,
+               min(u.updated_at)        AS first,
                count(DISTINCT u.kind)   AS kinds,
                count(DISTINCT CASE WHEN u.status IN ('done','failed')
                                    THEN u.worker END) AS workers,
@@ -1110,7 +1111,14 @@ def runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
             "running": left > 0,
             # Wall-clock from the start to the last thing that moved. While a
             # run is live that is "so far"; once it is over it is the duration.
-            "elapsed": (r["last"] or now) - r["started_at"] if r["started_at"] else None,
+            #
+            # From the EARLIER of the run's start and its first unit, and never
+            # negative. Workers on a second machine write their own clock into
+            # this database, and two machines a minute apart is ordinary, so a
+            # unit finishing "before" the run began is a thing that happens.
+            # It used to print as `-755.0s` elapsed and a blank parallelism,
+            # which reads as a broken product rather than a skewed clock.
+            "elapsed": _span(r["started_at"], r["first"], r["last"] or now),
             # Worker-seconds actually spent. Against elapsed it says how much
             # parallelism you really got, which is the number that tells you
             # whether more workers would have helped.
@@ -1121,6 +1129,21 @@ def runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
             "priced": r["priced"] or 0,
         })
     return out
+
+
+def _span(started_at: float | None, first: float | None,
+          last: float) -> float | None:
+    """Elapsed wall-clock, tolerant of clocks that disagree.
+
+    The span from the earliest timestamp on record to the latest, so it holds
+    every observation rather than assuming the run's own clock was right.
+    Clamping a negative to zero would be worse than the negative: it would say
+    a run that plainly did work took no time.
+    """
+    if started_at is None:
+        return None
+    begin = min(started_at, first) if first is not None else started_at
+    return max(started_at, last) - begin
 
 
 def run(conn: sqlite3.Connection, run_id: str) -> dict | None:

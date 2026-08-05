@@ -966,8 +966,6 @@ def main(argv: list[str] | None = None) -> int:
     return a.fn(a)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 def _cmd_init(a: argparse.Namespace) -> int:
@@ -1035,3 +1033,12 @@ def _cmd_install_skill(a: argparse.Namespace) -> int:
     print("It will define the work, enqueue it, spawn the workers, and collect")
     print("the results. `superagentic status --who` shows the fleet while it runs.")
     return 0
+
+
+# Last line in the file, deliberately. It used to sit two thirds of the way
+# down, so `python -m superagentic.cli` ran main() before the handlers below
+# it were defined and died with `NameError: name '_cmd_init' is not defined`.
+# The console script was fine, because importing the module runs all of it
+# before anything calls main(), which is why nothing noticed.
+if __name__ == "__main__":
+    raise SystemExit(main())

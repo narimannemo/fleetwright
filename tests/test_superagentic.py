@@ -2493,3 +2493,77 @@ class TestThenFromTheShell:
         conn = sa.connect(db)
         assert conn.execute("SELECT status FROM unit WHERE kind = 'ex'"
                             ).fetchone()["status"] == "leased"
+
+
+class TestClocksThatDisagree:
+    """Two machines sharing one database do not share one clock.
+
+    A worker on a second host writes its own `time.time()` into `updated_at`,
+    and hosts a minute or two apart are ordinary. A unit that finishes
+    "before" its run started then made `elapsed` negative, which printed as
+    `-755.0s` with a blank parallelism: it reads as a broken product rather
+    than a skewed clock.
+    """
+
+    def _run_with_skew(self, tmp_path, skew):
+        conn = sa.connect(str(tmp_path / f"w{skew}.db"))
+        sa.define(conn, "k", "x", done_when="y")
+        run = sa.start_run(conn, label="r")
+        sa.add(conn, "k", ["a"], run=run)
+        u = sa.claim(conn, "k", worker="w0")[0]
+        sa.finish(conn, u.unit_id, worker="w0")
+        started = conn.execute(
+            "SELECT started_at FROM run WHERE run_id = ?", (run,)).fetchone()[0]
+        # The remote worker's clock, `skew` seconds behind this one.
+        conn.execute("UPDATE unit SET updated_at = ?, claimed_at = ?",
+                     (started - skew, started - skew - 1))
+        conn.commit()
+        return conn
+
+    def test_a_unit_older_than_its_run_does_not_go_negative(self, tmp_path):
+        conn = self._run_with_skew(tmp_path, 120)
+        assert sa.runs(conn)[0]["elapsed"] >= 0
+
+    def test_the_run_is_at_least_as_long_as_the_skew(self, tmp_path):
+        """Clamping to zero would hide it; the run demonstrably spans it."""
+        conn = self._run_with_skew(tmp_path, 120)
+        assert sa.runs(conn)[0]["elapsed"] >= 120
+
+    def test_an_agreeing_clock_is_unaffected(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "ok.db"))
+        sa.define(conn, "k", "x", done_when="y")
+        run = sa.start_run(conn, label="r")
+        sa.add(conn, "k", ["a"], run=run)
+        u = sa.claim(conn, "k", worker="w0")[0]
+        sa.finish(conn, u.unit_id, worker="w0")
+        assert 0 <= sa.runs(conn)[0]["elapsed"] < 60
+
+
+class TestRunAsAModule:
+    """`python -m` must work, and only a subprocess can prove it.
+
+    Importing the module runs every definition before anything calls `main()`,
+    so the console script worked while `python -m superagentic.cli` died on a
+    `NameError` for a handler defined below the `__main__` guard. No in-process
+    test can see this: by the time the test calls `main`, the import is done.
+    """
+
+    def test_the_cli_module_runs(self):
+        r = subprocess.run([sys.executable, "-m", "superagentic.cli",
+                            "--version"], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert "superagentic" in r.stdout
+
+    def test_the_package_runs(self):
+        r = subprocess.run([sys.executable, "-m", "superagentic", "--version"],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert "superagentic" in r.stdout
+
+    def test_a_real_command_runs(self, tmp_path):
+        """--version short-circuits argparse; this reaches a handler."""
+        r = subprocess.run([sys.executable, "-m", "superagentic", "init",
+                            "--file", str(tmp_path / "s.toml")],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert (tmp_path / "s.toml").exists()

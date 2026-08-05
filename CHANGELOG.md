@@ -5,6 +5,33 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.19.1] — 2026-08-06
+
+Both found by opening the dashboard and looking at it.
+
+### Fixed
+
+- **A run's elapsed time could be negative**, printing `-755.0s` with a blank
+  parallelism, which reads as a broken product rather than what it is.
+  Workers on a second machine write their own clock into the shared database
+  and two hosts a minute apart is ordinary, so a unit that finished "before"
+  its run began is a thing that happens. Elapsed now spans every timestamp on
+  record rather than trusting the run's own clock. Clamping to zero would have
+  been worse: it would say a run that plainly did work took no time.
+- **`python -m superagentic.cli` died with `NameError: name '_cmd_init' is not
+  defined`.** The `if __name__ == "__main__"` guard sat two thirds of the way
+  down the file, so running the module as a script called `main()` before the
+  handlers below it existed. The console script was fine, because importing a
+  module runs all of it before anything calls `main()`, which is exactly why no
+  test caught it: an in-process test finishes importing first. Now tested by
+  subprocess, which is the only way to see it.
+
+### Added
+
+- **`python -m superagentic`**, for a wheel installed with `pip install
+  --target`, a zipapp, or a virtualenv whose `bin` is not on PATH: cases where
+  the package imports and the command does not exist.
+
 ## [0.19.0] — 2026-08-05
 
 ### Added
