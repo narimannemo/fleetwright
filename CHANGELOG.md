@@ -5,6 +5,54 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.10.0] — 2026-08-05
+
+Everything here came from using superagentic on real work for the first time:
+three agents auditing unjudged claims from a 1652 folio. Six units, 56
+verdicts. All three workers independently reported the same bug.
+
+### Fixed
+
+- **`add --run` was accepted and never read.** Every unit landed with
+  `run_id = NULL`, so **runs never worked from the CLI at all**, across four
+  releases. Every run test called `leases.add()` directly, so the library was
+  covered and the surface people actually use was not. There are CLI-level
+  tests now, and a sweep asserting every flag of every subcommand is read by
+  its handler.
+- **The brief told workers to call a command that does not exist.** It ends
+  "Call finish", the library function is `finish()`, the MCP tool is
+  `finish_job`, and the CLI verb was `done`. A shell worker following its own
+  brief ran nothing. `finish` is now the command at every layer, with `done`
+  kept as an alias because it is in shipped prompts. A test asserts every verb
+  the brief names is a real command.
+- **A malformed `--result` printed a Python traceback and left the unit
+  leased**, so it was silently redone when the lease expired while the worker
+  reported success. It is now a clean error, exit 2, and the unit stays yours.
+- **A large result had no route on Linux.** Linux caps a single argument at
+  128 KB (`MAX_ARG_STRLEN`) whatever `ARG_MAX` says, so a 455 KB result passes
+  on macOS and fails with `E2BIG` on Linux, in the main data path, where CI
+  cannot see it. `--result-file` fixes it and the generated prompt says when to
+  use it.
+
+### Added
+
+- **`skill-check`** re-hashes each registered skill's source and compares it to
+  what was recorded, exiting 1 if anything changed. The brief prints a digest
+  and nothing could check it: a fingerprint you cannot verify at the moment it
+  matters is decoration.
+- **The brief shows `meta`.** It was substituted into instructions but never
+  displayed, so a caller could not tell a worker how big its unit was. The
+  first real fleet had units of 2 to 24 claims and nothing said so.
+- A warning when a result is not the shape the kind declared in `returns`. Not
+  validation, since `returns` is prose, but a bare string against `{...}` is
+  worth a line.
+
+### Changed
+
+- The generated worker prompt no longer claims an empty queue "prints nothing".
+  It prints nothing **on stdout** and a note on stderr. Two of three workers
+  flagged the contradiction.
+
 ## [0.9.3] — 2026-08-04
 
 ### Fixed

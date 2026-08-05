@@ -7,6 +7,7 @@ superagentic start              begin a run; prints its id
 superagentic runs              every run, newest first
 superagentic skill NAME        say what a skill name means
 superagentic skills            registered skills and their use
+superagentic skill-check       re-hash sources, compare to what was registered
 superagentic define KIND       say what this kind of work IS
 superagentic add KIND NAME…    enqueue units; --from-file for a corpus
 superagentic claim [KIND]      take work; exits 1 when the queue is dry
@@ -43,6 +44,24 @@ There is no `end`. A run is over when its units are, which has to be derivable
 because the orchestrator is the process most likely to have died.
 
 `--run` also filters `claim`, `status`, `results` and `dashboard`.
+
+### `skill-check`
+
+```bash
+superagentic skill-check              # every registered skill with a digest
+superagentic skill-check xrad-extraction
+```
+
+```
+  xrad-extraction          OK      99cdba1cede56a04
+  latin-palaeography       CHANGED registered 4465e472f5ecbf95, now 8b21c0e4d9a1f772
+```
+
+Re-hashes each source and compares it to what was registered. Exits 1 if
+anything changed, because units claimed before and after used different text.
+The brief prints a digest, and without this nothing could confirm the file a
+worker just read hashes to it: a fingerprint you cannot check at the moment it
+matters is decoration.
 
 ### `skill` / `skills`
 
@@ -137,15 +156,18 @@ while unit=$(superagentic claim extract --json); do … done
 it is — declared, never verified — so `stats()` can compare one model's work
 against another's. `SUPERAGENTIC_MODEL` works too.
 
-### `done` / `fail` / `release`
+### `finish` / `fail` / `release`
 
 ```bash
-superagentic done    extract:p0189
+superagentic finish  extract:p0189          # `done` is an alias
+superagentic finish  extract:p0189 --result-file out.json
 superagentic fail    extract:p0189 --note "no text layer"
 superagentic release extract:p0189 --note "wrong language"
 ```
 
-`done` exits 1 if the lease had already expired and another worker owns the
+Use `--result-file` for anything large: Linux caps a single shell argument at 128 KB whatever `ARG_MAX` says.
+
+`finish` exits 1 if the lease had already expired and another worker owns the
 unit. `fail` retries until attempts run out, then sets the unit aside. `release`
 does not count against the limit.
 

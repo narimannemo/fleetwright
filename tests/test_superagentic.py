@@ -584,7 +584,7 @@ class TestDocs:
     def test_the_reference_matches_the_cli(self):
         from superagentic.cli import build_parser
         real = set(build_parser()._subparsers._group_actions[0].choices)
-        doc = set(re.findall(r"^superagentic (\w+)",
+        doc = set(re.findall(r"^superagentic ([\w-]+)",
                              (ROOT / "docs" / "reference.md").read_text(encoding="utf-8"),
                              re.M))
         assert not doc - real, f"documented but absent: {sorted(doc - real)}"
@@ -1348,3 +1348,121 @@ class TestMetadataMatchesReality:
         declared = sorted(c.rsplit(" ", 1)[1] for c in cfg["project"]["classifiers"]
                           if c.startswith("Programming Language :: Python :: 3"))
         assert cfg["project"]["requires-python"] == f">={declared[0]}"
+
+
+class TestCLIWiring:
+    """Every run test called the library directly, so `add --run` was accepted
+    and ignored for four releases and no test noticed. These go through the
+    CLI, which is the surface that was broken."""
+
+    def test_add_run_actually_attaches_units_to_the_run(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        cli_main(["start", "--db", db, "--label", "L", "--id", "R1"])
+        cli_main(["add", "x", "a", "b", "--db", db, "--run", "R1"])
+        conn = sa.connect(db)
+        runs = sa.runs(conn)
+        assert runs[0]["units"] == 2, "the run has no units; --run was ignored"
+        assert all(r["run_id"] == "R1"
+                   for r in conn.execute("SELECT run_id FROM unit"))
+
+    def test_every_flag_is_read_by_its_handler(self):
+        """The sweep that found `add --run`. One unwired flag out of 17
+        subcommands was luck, not design."""
+        import inspect
+        import re
+
+        from superagentic import cli
+        parser = cli.build_parser()
+        unread = []
+        for name, sp in parser._subparsers._group_actions[0].choices.items():
+            fn = sp.get_default("fn")
+            if fn is None:
+                continue
+            body = inspect.getsource(fn)
+            # Follow the module-level helpers the handler calls. `--result` is
+            # read inside _read_result, and a body-only scan calls that unread.
+            for helper in set(re.findall(r"\b(_[a-z_]+)\(a\b", body)):
+                target = getattr(cli, helper, None)
+                if target is not None:
+                    body += inspect.getsource(target)
+            for act in sp._actions:
+                if not act.option_strings or act.dest in ("help", "db"):
+                    continue
+                if not re.search(rf"\ba\.{re.escape(act.dest)}\b", body) and \
+                        not re.search(rf'getattr\(a, "{re.escape(act.dest)}"', body):
+                    unread.append(f"{name} {act.option_strings[0]}")
+        assert not unread, f"flags accepted but never read: {unread}"
+
+    def test_finish_and_done_are_the_same_command(self, tmp_path):
+        # The brief says "call finish". Until now the CLI only had `done`, so a
+        # worker following its own brief ran a command that did not exist.
+        for verb in ("finish", "done"):
+            db = str(tmp_path / f"{verb}.db")
+            cli_main(["add", "x", "u", "--db", db])
+            cli_main(["claim", "x", "--db", db, "--worker", "w"])
+            assert cli_main([verb, "x:u", "--db", db, "--worker", "w"]) == 0
+
+    def test_the_brief_names_a_command_that_exists(self):
+        import re
+
+        from superagentic.cli import build_parser
+        conn = sa.connect(":memory:")
+        sa.define(conn, "x", instructions="go")
+        sa.add(conn, "x", ["u"])
+        brief = sa.claim(conn, "x", worker="w")[0].brief()
+        real = set(build_parser()._subparsers._group_actions[0].choices)
+        for verb in re.findall(r"Call (\w+)", brief) + re.findall(r"or (\w+) with", brief):
+            assert verb in real, f"the brief says {verb!r}, which is not a command"
+
+    def test_a_malformed_result_is_an_error_not_a_traceback(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        cli_main(["add", "x", "u", "--db", db])
+        cli_main(["claim", "x", "--db", db, "--worker", "w"])
+        with pytest.raises(SystemExit) as e:
+            cli_main(["finish", "x:u", "--db", db, "--worker", "w", "--result", "{not json"])
+        assert e.value.code == 2
+        assert "not valid JSON" in capsys.readouterr().err
+        # And the unit must still be leased, not silently lost.
+        assert sa.progress(sa.connect(db))["x"][sa.LEASED] == 1
+
+    def test_result_file_carries_what_an_argument_cannot(self, tmp_path):
+        # Linux caps a single argument at 128 KB whatever ARG_MAX says, so a
+        # large result has no route without this.
+        db = str(tmp_path / "w.db")
+        big = {"verdicts": [{"id": i, "reason": "x" * 200} for i in range(2000)]}
+        f = tmp_path / "r.json"
+        f.write_text(json.dumps(big), encoding="utf-8")
+        assert len(f.read_text(encoding="utf-8")) > 400_000
+        cli_main(["add", "x", "u", "--db", db])
+        cli_main(["claim", "x", "--db", db, "--worker", "w"])
+        assert cli_main(["finish", "x:u", "--db", db, "--worker", "w",
+                         "--result-file", str(f)]) == 0
+        got = sa.results(sa.connect(db))[0]["result"]
+        assert len(got["verdicts"]) == 2000
+
+    def test_result_and_result_file_together_is_refused(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        f = tmp_path / "r.json"
+        f.write_text("{}", encoding="utf-8")
+        cli_main(["add", "x", "u", "--db", db])
+        cli_main(["claim", "x", "--db", db, "--worker", "w"])
+        with pytest.raises(SystemExit):
+            cli_main(["finish", "x:u", "--db", db, "--worker", "w",
+                      "--result", "{}", "--result-file", str(f)])
+
+    def test_the_brief_shows_meta_so_scope_is_visible(self, conn):
+        sa.define(conn, "x", instructions="do $name")
+        sa.add(conn, "x", ["u"], meta={"claims": 24, "path": "/a/b"})
+        b = sa.claim(conn, "x", worker="w")[0].brief()
+        assert "ABOUT THIS UNIT" in b and "claims: 24" in b
+
+    def test_skill_check_reports_a_changed_source(self, tmp_path, capsys):
+        db = str(tmp_path / "w.db")
+        f = tmp_path / "s.md"
+        f.write_text("original", encoding="utf-8")
+        cli_main(["skill", "sk", "--db", db, "--source", str(f), "--version", "1"])
+        assert cli_main(["skill-check", "--db", db]) == 0
+        assert "OK" in capsys.readouterr().out
+        f.write_text("edited since registration", encoding="utf-8")
+        assert cli_main(["skill-check", "--db", db]) == 1
+        assert "CHANGED" in capsys.readouterr().out

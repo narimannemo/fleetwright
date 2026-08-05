@@ -42,6 +42,44 @@ def _cmd_skill(a: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_skill_check(a: argparse.Namespace) -> int:
+    """Re-hash a skill's source and compare it to what was registered.
+
+    The brief prints a digest, and until now nothing could confirm the file a
+    worker just read hashes to it. A fingerprint you cannot check at the moment
+    it matters is decoration.
+    """
+    import hashlib
+    rows = {r["name"]: r for r in leases.skills(_conn(a))}
+    names = [a.name] if a.name else [n for n, r in rows.items() if r.get("digest")]
+    if a.name and a.name not in rows:
+        print(f"{a.name!r} is not registered", file=sys.stderr)
+        return 2
+    bad = 0
+    for n in names:
+        r = rows[n]
+        if not r.get("source"):
+            print(f"  {n:24s} no source recorded")
+            continue
+        f = Path(r["source"])
+        if not f.is_file():
+            print(f"  {n:24s} source is not a readable file: {r['source']}")
+            continue
+        now = hashlib.sha256(f.read_text(encoding="utf-8").encode()).hexdigest()[:16]
+        if not r.get("digest"):
+            print(f"  {n:24s} registered without a digest; it now hashes to {now}")
+        elif now == r["digest"]:
+            print(f"  {n:24s} OK      {now}")
+        else:
+            bad += 1
+            print(f"  {n:24s} CHANGED registered {r['digest']}, now {now}")
+    if bad:
+        print(f"\n{bad} skill(s) changed since registration. Units claimed "
+              "before and after used different text; re-register to record the "
+              "new version.", file=sys.stderr)
+    return 1 if bad else 0
+
+
 def _cmd_skills(a: argparse.Namespace) -> int:
     rows = leases.skills(_conn(a))
     if a.json:
@@ -167,7 +205,11 @@ def _cmd_add(a: argparse.Namespace) -> int:
         return 2
     conn = _conn(a)
     added = leases.add(conn, a.kind, names, priority=a.priority,
-                       meta=json.loads(a.meta) if a.meta else None)
+                       meta=json.loads(a.meta) if a.meta else None,
+                       # This was accepted and never read for four releases.
+                       # Runs worked from the library and never from the CLI,
+                       # because every run test called leases.add directly.
+                       run=a.run)
     print(f"{added:,} new · {len(names) - added:,} already queued")
     if leases.spec(conn, a.kind) is None:
         # Not an error — a bare queue is a legitimate use. But it is almost
@@ -206,9 +248,47 @@ def _cmd_claim(a: argparse.Namespace) -> int:
     return 0
 
 
+def _read_result(a: argparse.Namespace):
+    """The result payload, from a flag or a file, with real errors.
+
+    `--result-file` exists because Linux caps a SINGLE argument at 128 KB
+    (MAX_ARG_STRLEN) whatever ARG_MAX says. A 455 KB result passes on macOS and
+    fails with E2BIG on Linux, in the main data path, and CI cannot catch it
+    because CI never produces a large result.
+    """
+    raw = a.result
+    if getattr(a, "result_file", None):
+        if raw:
+            print("pass --result or --result-file, not both", file=sys.stderr)
+            raise SystemExit(2)
+        raw = Path(a.result_file).read_text(encoding="utf-8")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        # A traceback here is bad twice over: it is unreadable, and the unit
+        # stays leased because `done` never ran, so it is silently redone when
+        # the lease expires and the worker reports success either way.
+        print(f"--result is not valid JSON: {e}", file=sys.stderr)
+        print("  the unit is still yours; fix the JSON and call finish again,",
+              file=sys.stderr)
+        print("  or use --result-file to avoid shell quoting entirely.",
+              file=sys.stderr)
+        raise SystemExit(2) from None
+
+
 def _cmd_done(a: argparse.Namespace) -> int:
+    result = _read_result(a)
+    kind_spec = leases.spec(_conn(a), a.unit_id.split(":", 1)[0].split("/")[-1])
+    if (result is not None and kind_spec and (kind_spec.get("returns") or "").strip()
+            .startswith("{") and not isinstance(result, dict)):
+        # Not validation: `returns` is prose, not a schema. But handing back a
+        # bare string against a declared object shape is worth one line.
+        print(f"warning: this kind declares returns {kind_spec['returns']!r} "
+              f"but the result is a {type(result).__name__}", file=sys.stderr)
     if leases.finish(_conn(a), a.unit_id, worker=a.worker, note=a.note,
-                     result=json.loads(a.result) if a.result else None):
+                     result=result):
         print(f"done {a.unit_id}")
         return 0
     print(f"not yours — {a.unit_id}'s lease expired and another worker holds it",
@@ -329,6 +409,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note")
     s.set_defaults(fn=_cmd_skill)
 
+    s = common(sub.add_parser(
+        "skill-check", help="re-hash skill sources and compare to what was registered"))
+    s.add_argument("name", nargs="?")
+    s.set_defaults(fn=_cmd_skill_check)
+
     s = common(sub.add_parser("skills", help="registered skills and their use"))
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=_cmd_skills)
@@ -388,12 +473,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="print the full assignment, for piping into an agent")
     s.set_defaults(fn=_cmd_claim)
 
-    s = common(sub.add_parser("done", help="mark a unit finished"))
-    s.add_argument("unit_id")
-    s.add_argument("--result", help="JSON the worker produced")
-    s.add_argument("--note")
-    s.add_argument("--worker")
-    s.set_defaults(fn=_cmd_done)
+    # `finish` at every layer. The library has always been finish(), the MCP
+    # tool finish_job, and the brief says "call finish" — only the CLI said
+    # `done`, so every shell worker following its own brief ran a command that
+    # does not exist. All three workers in the first real fleet hit it.
+    # `done` stays as an alias: it is in shipped prompts and shell scripts.
+    for verb, helptext in (("finish", "mark a unit finished"),
+                           ("done", "alias for finish")):
+        s = common(sub.add_parser(verb, help=helptext))
+        s.add_argument("unit_id")
+        s.add_argument("--result", help="JSON the worker produced")
+        s.add_argument("--result-file", metavar="FILE",
+                       help="read the result from a file; use this for anything "
+                            "large, since Linux caps one argument at 128 KB")
+        s.add_argument("--note")
+        s.add_argument("--worker")
+        s.set_defaults(fn=_cmd_done)
 
     s = common(sub.add_parser("fail", help="report a unit that could not be done"))
     s.add_argument("unit_id")

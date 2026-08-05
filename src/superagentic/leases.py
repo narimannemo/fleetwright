@@ -263,6 +263,15 @@ class Unit:
             parts.append(f"\nUSE\n{self.tools}")
         if self.context:
             parts.append(f"\nCONTEXT\n{self.context}")
+        if self.meta:
+            # Substituted into the instructions but never shown, so a caller
+            # who puts a count or a size in meta had no way to surface it. The
+            # first real fleet had units of 2 to 24 claims and nothing said so.
+            shown = {k: v for k, v in self.meta.items()
+                     if isinstance(v, (str, int, float, bool))}
+            if shown:
+                parts.append("\nABOUT THIS UNIT\n" + "\n".join(
+                    f"  {k}: {v}" for k, v in shown.items()))
         if self.done_when:
             parts.append(f"\nDONE WHEN\n{self.done_when}")
         if self.returns:
@@ -801,15 +810,17 @@ tell you.$requires
 
 STEP 1 — claim a unit:
     $claim_cmd
-  If that exits non-zero and prints nothing, THE QUEUE IS EMPTY. Stop
-  immediately and report. Do NOT invent work. Do NOT go looking for things to
-  process on your own.
+  If that exits non-zero, THE QUEUE IS EMPTY. It prints nothing on stdout and
+  a short note on stderr. Stop immediately and report. Do NOT invent work. Do
+  NOT go looking for things to process on your own.
 
 STEP 2 — the output IS your assignment. It says what to do, what counts as
   done, and the exact shape to hand back. Do exactly that and nothing more.
 
 STEP 3 — report the result:
     $done_cmd
+  If the result is large, write it to a file and use --result-file instead:
+  a single shell argument is capped at 128 KB on Linux.
   If that says the lease expired, do not argue — claim a different unit.
 
 STEP 4 — go back to STEP 1.
@@ -855,7 +866,7 @@ def worker_prompt(conn: sqlite3.Connection, kind: str | None = None, *,
         claim_cmd=f"superagentic claim{k} --db {db} --brief "
                   f"--worker {worker} --model '<which model you are>' "
                   f"--lease {lease:g}",
-        done_cmd=f"superagentic done <unit_id> --db {db} --worker {worker} "
+        done_cmd=f"superagentic finish <unit_id> --db {db} --worker {worker} "
                  f"--result '<the JSON the brief asked for>'")
 
 
