@@ -22,7 +22,7 @@ jobs:
       - name: the tag and __version__ must agree
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          have=$(python -c "import re,pathlib;print(re.search(r'__version__ = \"(.*)\"', pathlib.Path('src/superagentic/__init__.py').read_text())[1])")
+          have=$(python -c "import re,pathlib;print(re.search(r'__version__ = \"(.*)\"', pathlib.Path('src/fleetwright/__init__.py').read_text())[1])")
           [ "$tag" = "$have" ] || { echo "tag $tag != __version__ $have"; exit 1; }
           grep -q "## \[$tag\]" CHANGELOG.md || { echo "no CHANGELOG section for $tag"; exit 1; }
       - run: uv build
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/superagentic
+      url: https://pypi.org/p/fleetwright
     permissions:
       # The only credential. No API token is stored anywhere: PyPI verifies the
       # workflow identity itself, and the credential lasts minutes.
@@ -67,26 +67,26 @@ jobs:
       - name: wait for the PyPI index to serve the new sdist
         run: |
           for i in $(seq 1 30); do
-            curl -sf "https://pypi.org/pypi/superagentic/${GITHUB_REF_NAME#v}/json" >/dev/null && exit 0
+            curl -sf "https://pypi.org/pypi/fleetwright/${GITHUB_REF_NAME#v}/json" >/dev/null && exit 0
             sleep 10
           done
           echo "PyPI never served ${GITHUB_REF_NAME#v}"; exit 1
-      - run: python packaging/brew_formula.py "$GITHUB_REF_NAME" > superagentic.rb
-      - run: cat superagentic.rb
+      - run: python packaging/brew_formula.py "$GITHUB_REF_NAME" > fleetwright.rb
+      - run: cat fleetwright.rb
       - uses: actions/upload-artifact@v4
-        with: { name: brew, path: superagentic.rb }
+        with: { name: brew, path: fleetwright.rb }
       - name: push to the tap, if one is configured
         if: ${{ env.TAP_TOKEN != '' }}
         run: |
           git clone --depth 1 \
             "https://x-access-token:${TAP_TOKEN}@github.com/narimannemo/homebrew-tap.git" tap
           mkdir -p tap/Formula
-          cp superagentic.rb tap/Formula/superagentic.rb
+          cp fleetwright.rb tap/Formula/fleetwright.rb
           cd tap
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/superagentic.rb
-          git diff --staged --quiet || git commit -m "superagentic ${GITHUB_REF_NAME#v}"
+          git add Formula/fleetwright.rb
+          git diff --staged --quiet || git commit -m "fleetwright ${GITHUB_REF_NAME#v}"
           git push
       - name: say so when the tap was skipped
         if: ${{ env.TAP_TOKEN == '' }}

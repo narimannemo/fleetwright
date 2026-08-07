@@ -5,6 +5,105 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.21.0] — 2026-08-07
+
+**Renamed from `superagentic` to `fleetwright`.** Same project, same author,
+new name on PyPI. Entries below 0.21.0 keep the old name because that is what
+those releases actually shipped as; rewriting them would make this file lie
+about history.
+
+```bash
+pip install fleetwright        # was: pip install superagentic
+fleetwright state              # was: superagentic state
+```
+
+`SUPERAGENTIC_TOKEN` and friends are now `FLEETWRIGHT_*`.
+
+### Fixed — an external audit, every finding reproduced first
+
+- **`finish`, `fail` and `release` did not check ownership by default.** The
+  predicate was only added when a worker name was passed, and all three
+  defaulted it to `None`, so "a worker cannot finish a unit it does not hold"
+  was opt-in — while `claim` had always defaulted its worker. A stale worker's
+  result overwrote the live holder's, the live holder was refused, and the row
+  was credited to the wrong worker. `worker=ANY` (`--any-worker`) keeps the
+  deliberate unowned close.
+- **The dashboard reclaimed leases on every GET**, because `stats()` begins
+  with `reclaim()`. A tab left open on a live run stole leases from workers
+  that were merely slow, at the polling cadence: the panel built to show what
+  is stuck was what made it stuck. It now passes `reclaim_first=False` and
+  opens the file `mode=ro`, so SQLite refuses a write rather than the code
+  promising not to attempt one.
+- **`echo null | fleetwright serve` killed the server**, stranding every lease
+  the process held. `handle()` called `.get` on whatever JSON arrived, and a
+  JSON-RPC batch is a list the spec requires a server to accept. Batches now
+  work, notifications get no reply (the spec says MUST NOT, and real clients
+  send `notifications/cancelled` routinely), parse errors are answered rather
+  than silently dropped, and `initialize` echoes a protocol version we speak.
+- **Stored XSS in `dashboard --out`.** `json.dumps` does not escape `</`, so a
+  unit named `</script><img src=x onerror=…>` closed the tag and the rest of
+  the snapshot was attacker-controlled. No database access needed: a worker
+  enqueues that name over MCP and the orchestrator mails the file to someone.
+- **`reclaim()` overwrote the real failure note** with "lease expired and out
+  of attempts" — the tautology replacing the only record of why, in the column
+  `failures()` and the "Could not finish" panel exist to show.
+- **`release()` burned an attempt** while being documented as "without calling
+  it a failure", so six honest hand-backs left a unit at the limit and the next
+  worker merely to crash sent it straight to `failed`.
+- **`claim --max-attempts` retired unrelated work.** It was passed into the
+  global `reclaim()`, which applies its limit to every expired unit in the
+  file: `claim b --max-attempts 1` retired three units of kind `a` in another
+  run. Retirement is now a per-kind policy (`define --max-attempts`) read per
+  unit, and the flag on `claim` bounds only what that call hands out.
+- **`finish(then=…)` committed the close and then raised.** Nothing validated
+  `then`, so a bad element raised inside `add()` after the unit was already
+  `done`: the caller saw a failure on a unit that had finished, lost the whole
+  follow-on stage, and could not retry because the unit was closed. A bare
+  string also enqueued one unit per character. Validated before the close now.
+- **A claimed unit could have no `kind_digest`.** The pin ran after the claim
+  committed, so a crash in between left a leased row unpinned and `brief_for`
+  fell back to the *current* definition — the exact answer pinning exists to
+  prevent. The pin now happens inside the claiming `UPDATE`.
+- **`state()` raised forever on an unreadable skill source** — the function
+  whose description says CALL THIS FIRST. A skill that became binary or lost
+  its read permission is now reported in `attention` rather than fatal.
+- **`?limit=abc` dropped the connection** instead of returning 400, `_find_db`
+  leaked a connection per candidate file, `stats(buckets=0)` raised, and
+  `reclaim()` reported only reopened units and not retirements.
+
+### Added
+
+- **The lease token as a credential.** Ownership rested on a worker *name*, and
+  two processes sharing one are indistinguishable — which the generated prompt
+  guaranteed, since it printed `--worker agent-1` for every worker it made.
+  `claim` returns a per-claim token, every brief carries it, and `finish`,
+  `fail`, `release` and `heartbeat` accept `token=` / `--token`. Optional: a
+  shell fleet should not have to plumb it through `jq` on day one. `prompt` no
+  longer emits a shared name at all.
+- **`define --max-attempts` / `max_attempts` in `fleetwright.toml`.**
+- **`bench/contention.py`**, and its numbers in the README. 64 processes over
+  5,000 units: all finish, 0 duplicates, 0 `SQLITE_BUSY`, 1,419 units/s, p99
+  claim 667 ms — the tail is published too, because it grows with worker count
+  and would matter for millisecond-long units.
+- **Content-Security-Policy and X-Frame-Options** on the dashboard, and
+  sessions that expire server-side to match the cookie.
+- A dashboard screenshot in the README.
+
+### Notes
+
+- **A test now drives every dashboard route against a live run and compares the
+  tables.** The old one passed throughout the bug: it grepped `dashboard.py`
+  for write verbs while the write was inside `leases.stats()`; it asserted a
+  unit was still `open` without ever claiming it, so it checked the one state
+  `reclaim` cannot touch; and its file-size assertion passed when the file grew.
+- Every new test here was checked by reverting its fix and confirming it fails.
+  That found two of mine asserting nothing.
+- The README no longer presents leases as a discovery. Gray and Cheriton 1989,
+  SQS 2006, Beanstalkd TTR 2007, and litequeue already does expiring claims on
+  SQLite.
+- "Idempotent, so a unit done twice converges" is gone. It is true of
+  deterministic work and false of the generative example on the same page.
+
 ## [0.20.0] — 2026-08-06
 
 ### Added

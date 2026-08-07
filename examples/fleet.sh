@@ -10,22 +10,22 @@ DB=${DB:-work.db}
 KIND=${KIND:-extract}
 N=${N:-8}
 
-superagentic add "$KIND" --from-file "${1:?usage: fleet.sh <units-file>}" --db "$DB"
+fleetwright add "$KIND" --from-file "${1:?usage: fleet.sh <units-file>}" --db "$DB"
 
 for _ in $(seq 1 "$N"); do
   (
-    while unit=$(superagentic claim "$KIND" --json --lease 1800 --db "$DB"); do
+    while unit=$(fleetwright claim "$KIND" --json --lease 1800 --db "$DB"); do
       id=$(printf '%s' "$unit" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["unit_id"])')
       name=$(printf '%s' "$unit" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["name"])')
 
       if ./do-the-work "$name"; then
-        superagentic done "$id" --db "$DB"
+        fleetwright done "$id" --db "$DB"
       else
-        superagentic fail "$id" --note "exited $?" --db "$DB"
+        fleetwright fail "$id" --note "exited $?" --db "$DB"
       fi
     done
   ) &
 done
 
 wait
-superagentic status --who --db "$DB"
+fleetwright status --who --db "$DB"

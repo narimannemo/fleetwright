@@ -5,7 +5,7 @@ whoever's shell history ran them last. Nothing was reviewable, nothing was
 diffable, and the only record of how a corpus was extracted was the extraction
 itself.
 
-    superagentic apply superagentic.toml
+    fleetwright apply fleetwright.toml
 
 TOML, not YAML, for one boring reason and one good one. The boring one is that
 `tomllib` is in the standard library since 3.11 and this package has no
@@ -26,9 +26,9 @@ from pathlib import Path
 
 from . import leases
 
-EXAMPLE = '''# superagentic.toml
+EXAMPLE = '''# fleetwright.toml
 #
-#   superagentic apply          # register the skills, define the kinds
+#   fleetwright apply          # register the skills, define the kinds
 #
 # Kinds are durable: this is what the work IS. Units are per run and stay on
 # the command line, because they usually come from a listing.

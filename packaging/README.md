@@ -4,10 +4,10 @@ Three ways to install this, and they are for different people.
 
 | | Command | Use it when |
 |---|---|---|
-| **uv tool** | `uv tool install superagentic` | You want the CLI on your PATH, isolated from every project's environment. **The default.** |
-| **uvx** | `uvx superagentic demo` | You want to run it once without installing anything. |
-| **uv pip / pip** | `uv pip install superagentic` | You are importing it in Python, not running the CLI. |
-| **Homebrew** | `brew install narimannemo/tap/superagentic` | You are on macOS or Linuxbrew and want it managed with everything else. |
+| **uv tool** | `uv tool install fleetwright` | You want the CLI on your PATH, isolated from every project's environment. **The default.** |
+| **uvx** | `uvx fleetwright demo` | You want to run it once without installing anything. |
+| **uv pip / pip** | `uv pip install fleetwright` | You are importing it in Python, not running the CLI. |
+| **Homebrew** | `brew install narimannemo/tap/fleetwright` | You are on macOS or Linuxbrew and want it managed with everything else. |
 
 ## Why uv is the recommendation and brew is not
 
@@ -23,7 +23,7 @@ completely reasonable position, so the formula is maintained.
 ## Why there is a CLI *and* a library in one package
 
 The library is what a worker loop imports; the CLI is what a shell fleet calls
-and what `superagentic serve` runs as an MCP server. Splitting them would mean
+and what `fleetwright serve` runs as an MCP server. Splitting them would mean
 two packages whose versions must agree, to save a few kilobytes of argparse
 usage. They stay together.
 
@@ -53,9 +53,9 @@ pending publisher**:
 
 | Field | Value |
 |---|---|
-| PyPI project name | `superagentic` |
+| PyPI project name | `fleetwright` |
 | Owner | `narimannemo` |
-| Repository name | `superagentic` |
+| Repository name | `fleetwright` |
 | Workflow name | `release.yml` |
 | Environment name | `pypi` |
 
@@ -70,7 +70,7 @@ at upload time and the credential lasts minutes.
 ### Homebrew tap — optional, and the release survives without it
 
 Create `narimannemo/homebrew-tap` on GitHub (the scaffold is in this workspace).
-Then add a repository secret on **superagentic**:
+Then add a repository secret on **fleetwright**:
 
 | Secret | Value |
 |---|---|
@@ -85,14 +85,14 @@ yet.
 
 ```bash
 # 1. version and changelog, in the same commit
-$EDITOR src/superagentic/__init__.py    # __version__ = "0.2.0"
+$EDITOR src/fleetwright/__init__.py    # __version__ = "0.2.0"
 $EDITOR CHANGELOG.md                    # ## [0.2.0] — YYYY-MM-DD
 
 git commit -am "0.2.0"
 git push
 
 # 2. the tag does everything else
-git tag -a v0.2.0 -m "superagentic 0.2.0"
+git tag -a v0.2.0 -m "fleetwright 0.2.0"
 git push origin v0.2.0
 ```
 

@@ -125,7 +125,7 @@ merely to crash sent it straight to `failed`.
 on the kind:
 
 ```bash
-superagentic define extract --instructions '...' --max-attempts 5
+fleetwright define extract --instructions '...' --max-attempts 5
 ```
 
 `reclaim()` is global — it sweeps every expired unit in the file — so it reads
@@ -182,7 +182,7 @@ gaps.
 A kind requires skills by name. The registry says what a name **means**:
 
 ```bash
-superagentic skill xrad-extraction --source skills/xrad/SKILL.md --version 1.2
+fleetwright skill xrad-extraction --source skills/xrad/SKILL.md --version 1.2
 ```
 
 Three things follow, and each is a decision:
@@ -270,7 +270,7 @@ So pick deliberately:
 
 And because a shared kind name is the sharp edge, redefining a kind with live
 units is refused unless forced, and every unit pins the definition it was
-claimed under so `superagentic brief` can always say what it was told.
+claimed under so `fleetwright brief` can always say what it was told.
 
 ## `kind` and `name` are opaque
 
@@ -292,7 +292,7 @@ opinions about your pipeline, and the next person has to work around them.
   that losing one costs little.
 - **No shared mutable state between workers.** See above — it is refused, not
   merely absent.
-- **It does not spawn anything.** `superagentic prompt` generates the prompt to
+- **It does not spawn anything.** `fleetwright prompt` generates the prompt to
   spawn workers with; running it is your runtime's job. Making this package
   spawn agents would mean it needed an agent runtime, credentials, and an
   opinion about which one — and it would stop working for the shell fleet that

@@ -1,8 +1,8 @@
-<img src="assets/superagentic.svg" alt="SuperAgentic" width="420">
+<img src="assets/fleetwright.svg" alt="fleetwright" width="420">
 
-[![ci](https://github.com/narimannemo/superagentic/actions/workflows/ci.yml/badge.svg)](https://github.com/narimannemo/superagentic/actions/workflows/ci.yml)
-[![pypi](https://img.shields.io/pypi/v/superagentic)](https://pypi.org/project/superagentic/)
-[![python](https://img.shields.io/pypi/pyversions/superagentic)](https://pypi.org/project/superagentic/)
+[![ci](https://github.com/narimannemo/fleetwright/actions/workflows/ci.yml/badge.svg)](https://github.com/narimannemo/fleetwright/actions/workflows/ci.yml)
+[![pypi](https://img.shields.io/pypi/v/fleetwright)](https://pypi.org/project/fleetwright/)
+[![python](https://img.shields.io/pypi/pyversions/fleetwright)](https://pypi.org/project/fleetwright/)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
 
@@ -20,7 +20,7 @@ it needs two things it can only get by asking.
 2. **What am I supposed to do with it?** The task, what finished looks like,
    what to hand back, and which skills I need first.
 
-SuperAgentic is where both live. You define the work once and enqueue the
+fleetwright is where both live. You define the work once and enqueue the
 units; every worker claims one and is handed the assignment with it. Nothing
 collides, nothing guesses, and afterwards you can see what actually happened.
 
@@ -30,8 +30,8 @@ dependencies at all**.
 ## Start here
 
 ```bash
-uv tool install superagentic
-superagentic install-skill
+uv tool install fleetwright
+fleetwright install-skill
 ```
 
 That writes a skill into `.claude/skills/`. Now ask Claude in English:
@@ -43,8 +43,8 @@ spawns the workers **in one message so they run at once**, waits for them, and
 collects the results. You watch it with:
 
 ```bash
-superagentic status --who      # who is holding what, right now
-superagentic dashboard         # or the whole picture in a browser
+fleetwright status --who      # who is holding what, right now
+fleetwright dashboard         # or the whole picture in a browser
 ```
 
 If you would rather drive it yourself, everything below is what the skill is
@@ -52,14 +52,14 @@ doing on your behalf. And if you run the same work often, put it in a file
 instead of a shell history:
 
 ```bash
-superagentic init      # writes a commented superagentic.toml
-superagentic apply     # registers the skills, defines the kinds, enqueues
+fleetwright init      # writes a commented fleetwright.toml
+fleetwright apply     # registers the skills, defines the kinds, enqueues
 ```
 
 ## The shape of it
 
 ```python
-import superagentic as sa
+import fleetwright as sa
 conn = sa.connect("work.db")
 
 # One execution of a fleet. Everything below belongs to it, so afterwards you
@@ -111,13 +111,13 @@ Call finish (unit_id=extract:p0189) when done, or fail with a reason.
 Do not start any other unit.
 ```
 
-You do not write that prompt. `superagentic prompt extract -n 10` generates it
+You do not write that prompt. `fleetwright prompt extract -n 10` generates it
 from the kind, so the template cannot drift from the work it describes.
 
 ## In sixty seconds
 
 ```bash
-uvx superagentic demo
+uvx fleetwright demo
 ```
 
 ```
@@ -219,8 +219,8 @@ wrong tool.
 ## Watching it run
 
 ```bash
-superagentic dashboard --db work.db          # http://127.0.0.1:8787
-superagentic dashboard --out fleet.html      # a static snapshot
+fleetwright dashboard --db work.db          # http://127.0.0.1:8787
+fleetwright dashboard --out fleet.html      # a static snapshot
 ```
 
 ![The dashboard: a five-stage run, five workers, and the pipeline drawn as
@@ -254,21 +254,21 @@ off loopback unless one is set**.
 Eight workers, no coordinator:
 
 ```bash
-superagentic add extract --from-file pages.txt --run "$RUN"
+fleetwright add extract --from-file pages.txt --run "$RUN"
 
 for i in $(seq 1 8); do
-  ( while unit=$(superagentic claim extract --json --lease 1800); do
+  ( while unit=$(fleetwright claim extract --json --lease 1800); do
       id=$(echo "$unit" | jq -r '.[0].unit_id')
       name=$(echo "$unit" | jq -r '.[0].name')
       if my-extractor "$name"; then
-        superagentic done "$id"
+        fleetwright done "$id"
       else
-        superagentic fail "$id" --note "extractor exited $?"
+        fleetwright fail "$id" --note "extractor exited $?"
       fi
     done ) &
 done
 wait
-superagentic status --who
+fleetwright status --who
 ```
 
 A script driving a fleet does not need to parse any of that. `wait` blocks
@@ -276,15 +276,15 @@ until the work is over and the **exit code is the interface**: `0` finished
 cleanly, `1` something failed, `2` timed out.
 
 ```bash
-RUN=$(superagentic start --label "nightly extraction")
-superagentic add extract --from-file pages.txt --run "$RUN"
+RUN=$(fleetwright start --label "nightly extraction")
+fleetwright add extract --from-file pages.txt --run "$RUN"
 ./spawn-my-workers.sh &
 
-if superagentic wait --run "$RUN" --timeout 7200; then
+if fleetwright wait --run "$RUN" --timeout 7200; then
   ./collect-results.sh
 else
-  superagentic status --run "$RUN"        # something failed, or it stalled
-  superagentic retry --run "$RUN"         # fix the bug, re-run only what broke
+  fleetwright status --run "$RUN"        # something failed, or it stalled
+  fleetwright retry --run "$RUN"         # fix the bug, re-run only what broke
 fi
 ```
 
@@ -304,7 +304,7 @@ can stand up an entire fleet without touching a shell.
 `heartbeat_job` and `job_status`.
 
 ```json
-{"mcpServers": {"work": {"command": "superagentic",
+{"mcpServers": {"work": {"command": "fleetwright",
                          "args": ["serve", "--db", "work.db"]}}}
 ```
 
@@ -337,7 +337,7 @@ SQLite over NFS is not safe and this does not pretend otherwise.
 
 **Not exactly once.** See above. Nothing is.
 
-**It does not spawn agents.** `superagentic prompt` generates the prompt to
+**It does not spawn agents.** `fleetwright prompt` generates the prompt to
 spawn them with. Running it belongs to your runtime, because the moment this
 package spawns anything it needs credentials and an opinion about which agent
 framework you use.

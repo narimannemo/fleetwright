@@ -1239,9 +1239,9 @@ def worker_prompt(conn: sqlite3.Connection, kind: str | None = None, *,
     w = f" --worker {worker}" if worker else ""
     return Template(WORKER_PROMPT).safe_substitute(
         worker=worker or "set automatically, one per process", requires=req,
-        claim_cmd=f"superagentic claim{k} --db {db} --brief{w} "
+        claim_cmd=f"fleetwright claim{k} --db {db} --brief{w} "
                   f"--model '<which model you are>' --lease {lease:g}",
-        done_cmd=f"superagentic finish <unit_id> --db {db}{w} "
+        done_cmd=f"fleetwright finish <unit_id> --db {db}{w} "
                  f"--token <token-from-your-brief> "
                  f"--result '<the JSON the brief asked for>'")
 
@@ -1630,7 +1630,7 @@ def state(conn: sqlite3.Connection, *, stale_after: float = 0.0) -> dict:
     literal next command rather than leaving that to be inferred.
 
     Everything here is a fact plus what to do about it. A summary that reports
-    three failures without saying `superagentic retry` has moved the work of
+    three failures without saying `fleetwright retry` has moved the work of
     knowing the tool onto whoever is reading, which for a fresh agent is the
     whole problem.
     """
@@ -1649,7 +1649,7 @@ def state(conn: sqlite3.Connection, *, stale_after: float = 0.0) -> dict:
         attention.append({
             "what": f"{totals[FAILED]} unit(s) no worker could finish",
             "detail": "; ".join(f"{b['name']}: {b['note'] or '?'}" for b in bad),
-            "do": "superagentic retry --all   # after fixing the cause",
+            "do": "fleetwright retry --all   # after fixing the cause",
         })
     held = leased(conn)
     stuck = [h for h in held
@@ -1658,7 +1658,7 @@ def state(conn: sqlite3.Connection, *, stale_after: float = 0.0) -> dict:
         attention.append({
             "what": f"{len(stuck)} unit(s) held for a long time",
             "detail": ", ".join(f"{h['name']} by {h['worker']}" for h in stuck[:3]),
-            "do": "superagentic status --who   # the workers may be gone",
+            "do": "fleetwright status --who   # the workers may be gone",
         })
     changed, unreadable = [], []
     for sk in skills(conn):
@@ -1691,29 +1691,29 @@ def state(conn: sqlite3.Connection, *, stale_after: float = 0.0) -> dict:
         attention.append({
             "what": f"{len(changed)} skill(s) changed since registration",
             "detail": ", ".join(changed),
-            "do": "superagentic skill-check",
+            "do": "fleetwright skill-check",
         })
     unregistered = [s["name"] for s in skills(conn) if s.get("unregistered")]
     if unregistered:
         attention.append({
             "what": f"{len(unregistered)} skill(s) required but never registered",
             "detail": ", ".join(unregistered),
-            "do": "superagentic skill <name> --source FILE",
+            "do": "fleetwright skill <name> --source FILE",
         })
 
     # The single next thing. Ordered by what actually blocks progress.
     if not prog:
-        nxt = ("superagentic init && superagentic apply"
+        nxt = ("fleetwright init && fleetwright apply"
                if not conn.execute("SELECT count(*) FROM kind").fetchone()[0]
-               else "superagentic add <kind> --from-file units.txt --run <run>")
+               else "fleetwright add <kind> --from-file units.txt --run <run>")
     elif live:
         r = live[0]
-        nxt = (f"superagentic wait --run {r['run_id']}"
+        nxt = (f"fleetwright wait --run {r['run_id']}"
                f"   # {r['left']:,} unit(s) left")
     elif totals[FAILED]:
-        nxt = "superagentic retry --all   # after fixing the cause"
+        nxt = "fleetwright retry --all   # after fixing the cause"
     else:
-        nxt = "superagentic results <kind> --jsonl --flat   # everything is done"
+        nxt = "fleetwright results <kind> --jsonl --flat   # everything is done"
 
     return {
         "now": now,

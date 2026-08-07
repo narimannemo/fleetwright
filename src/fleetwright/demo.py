@@ -1,4 +1,4 @@
-"""`superagentic demo` — a fleet, a crash, and a recovery, in sixty seconds.
+"""`fleetwright demo` — a fleet, a crash, and a recovery, in sixty seconds.
 
 Runs against a throwaway database so it can be run anywhere, including from a
 `uvx` with nothing installed. ASCII only: box-drawing characters raise

@@ -3,34 +3,34 @@
 ## Commands
 
 ```
-superagentic state             where this project is; run this first
-superagentic init              write a starter superagentic.toml
-superagentic apply             register skills and define kinds from it
-superagentic start              begin a run; prints its id
-superagentic runs              every run, newest first
-superagentic skill NAME        say what a skill name means
-superagentic skills            registered skills and their use
-superagentic skill-check       re-hash sources, compare to what was registered
-superagentic define KIND       say what this kind of work IS
-superagentic add KIND NAME…    enqueue units; --from-file for a corpus
-superagentic claim [KIND]      take work; exits 1 when the queue is dry
-superagentic done UNIT_ID      mark finished
-superagentic fail UNIT_ID      report one that could not be done
-superagentic release UNIT_ID   hand back, no attempt burned
-superagentic status            what is left, who holds what
-superagentic prompt [KIND]     the spawn prompt, generated from the kind
-superagentic brief UNIT_ID     exactly what one unit was told
-superagentic lineage UNIT_ID   what caused it, and what it caused
-superagentic kinds [KIND]      every definition a kind has had
-superagentic results [KIND]    what the fleet handed back
-superagentic dashboard         a live view of the fleet, in a browser
-superagentic wait              block until done; exit 1 if anything failed
-superagentic retry [NAME...]   put failed units back, attempts reset
-superagentic cancel [NAME...]  stop work that has not started
-superagentic reclaim           return expired leases now
-superagentic serve             the MCP server, on stdio
-superagentic install-skill     teach Claude Code to run fleets
-superagentic demo              a fleet, a crash, a recovery
+fleetwright state             where this project is; run this first
+fleetwright init              write a starter fleetwright.toml
+fleetwright apply             register skills and define kinds from it
+fleetwright start              begin a run; prints its id
+fleetwright runs              every run, newest first
+fleetwright skill NAME        say what a skill name means
+fleetwright skills            registered skills and their use
+fleetwright skill-check       re-hash sources, compare to what was registered
+fleetwright define KIND       say what this kind of work IS
+fleetwright add KIND NAME…    enqueue units; --from-file for a corpus
+fleetwright claim [KIND]      take work; exits 1 when the queue is dry
+fleetwright done UNIT_ID      mark finished
+fleetwright fail UNIT_ID      report one that could not be done
+fleetwright release UNIT_ID   hand back, no attempt burned
+fleetwright status            what is left, who holds what
+fleetwright prompt [KIND]     the spawn prompt, generated from the kind
+fleetwright brief UNIT_ID     exactly what one unit was told
+fleetwright lineage UNIT_ID   what caused it, and what it caused
+fleetwright kinds [KIND]      every definition a kind has had
+fleetwright results [KIND]    what the fleet handed back
+fleetwright dashboard         a live view of the fleet, in a browser
+fleetwright wait              block until done; exit 1 if anything failed
+fleetwright retry [NAME...]   put failed units back, attempts reset
+fleetwright cancel [NAME...]  stop work that has not started
+fleetwright reclaim           return expired leases now
+fleetwright serve             the MCP server, on stdio
+fleetwright install-skill     teach Claude Code to run fleets
+fleetwright demo              a fleet, a crash, a recovery
 ```
 
 Every command except `demo` takes `--db` (default `work.db`).
@@ -42,7 +42,7 @@ database even if you do not know its name, and ends with the single next
 command rather than leaving that to be inferred.
 
 ```
-superagentic 0.16.0 · work.db
+fleetwright 0.16.0 · work.db
   520 units: 412 done, 3 failed, 99 waiting, 6 in flight
   kinds: audit, extract
   skills: house-style, xrad-extraction
@@ -54,13 +54,13 @@ RUNS
 NEEDS ATTENTION
   3 unit(s) no worker could finish
     p0071: no text layer in the scan; p0114: OCR returned 0 characters
-    -> superagentic retry --all   # after fixing the cause
+    -> fleetwright retry --all   # after fixing the cause
 
 NEXT
-  superagentic wait --run 20260805-150055-1ce3   # 105 unit(s) left
+  fleetwright wait --run 20260805-150055-1ce3   # 105 unit(s) left
 ```
 
-A summary that reports three failures without saying `superagentic retry` has
+A summary that reports three failures without saying `fleetwright retry` has
 moved the work of knowing the tool onto whoever is reading it, which for a
 fresh agent is the entire problem. Every line under NEEDS ATTENTION carries
 what to do about it.
@@ -71,8 +71,8 @@ to call it before anything else.
 ### `init` / `apply`
 
 ```bash
-superagentic init            # writes a commented superagentic.toml
-superagentic apply --run "$RUN"
+fleetwright init            # writes a commented fleetwright.toml
+fleetwright apply --run "$RUN"
 ```
 
 ```toml
@@ -108,9 +108,9 @@ command line, except for the convenience of `units_from` and `units_glob`.
 ### `start` / `runs`
 
 ```bash
-RUN=$(superagentic start --label "Tomus II extraction" --db work.db)
-superagentic add extract --from-file pages.txt --run "$RUN" --db work.db
-superagentic runs --db work.db
+RUN=$(fleetwright start --label "Tomus II extraction" --db work.db)
+fleetwright add extract --from-file pages.txt --run "$RUN" --db work.db
+fleetwright runs --db work.db
 ```
 
 A **run** is one execution of a fleet. It groups the units so you can ask what
@@ -128,8 +128,8 @@ because the orchestrator is the process most likely to have died.
 ### `skill-check`
 
 ```bash
-superagentic skill-check              # every registered skill with a digest
-superagentic skill-check xrad-extraction
+fleetwright skill-check              # every registered skill with a digest
+fleetwright skill-check xrad-extraction
 ```
 
 ```
@@ -146,9 +146,9 @@ matters is decoration.
 ### `skill` / `skills`
 
 ```bash
-superagentic skill xrad-extraction --source skills/xrad/SKILL.md --version 1.2
-superagentic skill latin-palaeography --source https://example.org/pal --version 0.4
-superagentic skills
+fleetwright skill xrad-extraction --source skills/xrad/SKILL.md --version 1.2
+fleetwright skill latin-palaeography --source https://example.org/pal --version 0.4
+fleetwright skills
 ```
 
 ```
@@ -176,14 +176,14 @@ agents — see [Concepts](concepts.md).
 ### `define`
 
 ```bash
-superagentic define extract \
+fleetwright define extract \
   --instructions 'Read $path. Record every claim it makes, quoting verbatim.' \
   --done-when    'every claim on the page is recorded, or you have established
                   there are none' \
   --returns      '{"claims": <int>, "notes": "<string>"}' \
   --tools        'the xrad MCP server: record_claim, check_quote'
 
-superagentic define extract --instructions-file prompts/extract.md
+fleetwright define extract --instructions-file prompts/extract.md
 ```
 
 Say what the work **is**, once. Every worker that claims a unit of this kind is
@@ -202,10 +202,10 @@ reaches every worker that has not yet claimed, without restarting anything.
 ### `add`
 
 ```bash
-superagentic add translate p1 p2 p3
-superagentic add translate --from-file pages.txt --priority 5
-superagentic add extract --from-file pages.txt --meta '{"path": "scans/$name.png"}'
-ls corpus/ | superagentic add extract --from-file -
+fleetwright add translate p1 p2 p3
+fleetwright add translate --from-file pages.txt --priority 5
+fleetwright add extract --from-file pages.txt --meta '{"path": "scans/$name.png"}'
+ls corpus/ | fleetwright add extract --from-file -
 ```
 
 Keyed on `kind:name`, so re-running an enumeration after the corpus grows adds
@@ -214,36 +214,36 @@ only what is new. The same name under two kinds is two units.
 ### `claim`
 
 ```bash
-superagentic claim translate --lease 1800 -n 5
-superagentic claim --json                      # the unit and its full brief
-superagentic claim extract --brief             # just the assignment, as text
+fleetwright claim translate --lease 1800 -n 5
+fleetwright claim --json                      # the unit and its full brief
+fleetwright claim extract --brief             # just the assignment, as text
 ```
 
 `--brief` prints the whole assignment and nothing else, for handing straight to
 an agent:
 
 ```bash
-superagentic claim extract --brief | claude -p -
+fleetwright claim extract --brief | claude -p -
 ```
 
 Exits **1** with no stdout when there is nothing to take, so:
 
 ```bash
-while unit=$(superagentic claim extract --json); do … done
+while unit=$(fleetwright claim extract --json); do … done
 ```
 
 `--worker` defaults to `hostname:pid`. `--model` records what the worker says
 it is — declared, never verified — so `stats()` can compare one model's work
-against another's. `SUPERAGENTIC_MODEL` works too.
+against another's. `FLEETWRIGHT_MODEL` works too.
 
 ### `finish` / `fail` / `release`
 
 ```bash
-superagentic finish  extract:p0189          # `done` is an alias
-superagentic finish  extract:p0189 --cost 0.031 --tokens-in 3100 --tokens-out 900
-superagentic finish  extract:p0189 --result-file out.json
-superagentic fail    extract:p0189 --note "no text layer"
-superagentic release extract:p0189 --note "wrong language"
+fleetwright finish  extract:p0189          # `done` is an alias
+fleetwright finish  extract:p0189 --cost 0.031 --tokens-in 3100 --tokens-out 900
+fleetwright finish  extract:p0189 --result-file out.json
+fleetwright fail    extract:p0189 --note "no text layer"
+fleetwright release extract:p0189 --note "wrong language"
 ```
 
 `--cost`, `--tokens-in` and `--tokens-out` are **declared, never measured**:
@@ -262,14 +262,14 @@ does not count against the limit.
 ### `status`
 
 ```bash
-superagentic status --who
-superagentic status extract --json
+fleetwright status --who
+fleetwright status extract --json
 ```
 
 ### `prompt`
 
 ```bash
-superagentic prompt extract --db work.db -n 4
+fleetwright prompt extract --db work.db -n 4
 ```
 
 The prompt to spawn workers with, **generated from the kind** rather than
@@ -284,7 +284,7 @@ actually parses against the real CLI.
 ### `finish --then`
 
 ```bash
-superagentic finish "$UNIT" --then '{"audit": ["p001-c0", "p001-c1"]}'
+fleetwright finish "$UNIT" --then '{"audit": ["p001-c0", "p001-c1"]}'
 ```
 
 The only way one unit causes another to exist. The new units inherit the
@@ -298,7 +298,7 @@ name, and a worker with no instructions does the wrong work confidently.
 ### `claim --spawned-by`
 
 ```bash
-export SUPERAGENTIC_SPAWNED_BY="session-a"     # once, before spawning
+export FLEETWRIGHT_SPAWNED_BY="session-a"     # once, before spawning
 ```
 
 Who spawned this worker. Declared, never measured: a subagent cannot observe
@@ -309,7 +309,7 @@ export labels the whole fleet without editing any worker prompt.
 ### `lineage`
 
 ```bash
-superagentic lineage 'run/gloss:p001-c0-g'
+fleetwright lineage 'run/gloss:p001-c0-g'
 ```
 
 ```
@@ -331,8 +331,8 @@ work.
 ### `brief` / `kinds`
 
 ```bash
-superagentic brief 'run/extract:p0189'   # what THAT unit was told
-superagentic kinds extract               # every definition it has had
+fleetwright brief 'run/extract:p0189'   # what THAT unit was told
+fleetwright kinds extract               # every definition it has had
 ```
 
 ```
@@ -355,7 +355,7 @@ re-derived from it plus that unit's own `meta`.
 ### `results`
 
 ```bash
-superagentic results extract --json
+fleetwright results extract --json
 ```
 
 What finished units handed back, in the order they finished. For the process
@@ -364,8 +364,8 @@ that spawned the fleet and now has to assemble the output.
 ### `dashboard`
 
 ```bash
-superagentic dashboard --db work.db              # http://127.0.0.1:8787
-superagentic dashboard --db work.db --out fleet.html   # static snapshot
+fleetwright dashboard --db work.db              # http://127.0.0.1:8787
+fleetwright dashboard --db work.db --out fleet.html   # static snapshot
 ```
 
 Six tiles (left, done, in flight, failed, throughput, ETA), units finished over
@@ -398,7 +398,7 @@ view that silently shows the first 300 of 40,000 is a view that lies.
 ### `wait`
 
 ```bash
-superagentic wait --run "$RUN" --timeout 3600
+fleetwright wait --run "$RUN" --timeout 3600
 ```
 
 Blocks until nothing is open and nothing is in flight. **The exit code is the
@@ -412,9 +412,9 @@ hour-long run does not print eighteen hundred identical lines.
 ### `retry`
 
 ```bash
-superagentic retry --run "$RUN"          # every failed unit in that run
-superagentic retry p0189 p0233           # just these
-superagentic retry --all --include-cancelled
+fleetwright retry --run "$RUN"          # every failed unit in that run
+fleetwright retry p0189 p0233           # just these
+fleetwright retry --all --include-cancelled
 ```
 
 **Attempts go back to zero**, not up by one. The unit failed under the old
@@ -429,8 +429,8 @@ undone.
 ### `cancel`
 
 ```bash
-superagentic cancel --run "$RUN"         # stop what has not started
-superagentic cancel --run "$RUN" --now   # and take back what is in flight
+fleetwright cancel --run "$RUN"         # stop what has not started
+fleetwright cancel --run "$RUN" --now   # and take back what is in flight
 ```
 
 By default it cancels `open` units only and lets in-flight work finish, because
@@ -449,7 +449,7 @@ useful when you want to see the state before any worker asks.
 ### `serve`
 
 ```bash
-superagentic serve --db work.db
+fleetwright serve --db work.db
 ```
 
 See [MCP](mcp.md).
@@ -457,8 +457,8 @@ See [MCP](mcp.md).
 ### `install-skill`
 
 ```bash
-superagentic install-skill          # this project: .claude/skills/superagentic/
-superagentic install-skill --user   # every project on this machine
+fleetwright install-skill          # this project: .claude/skills/fleetwright/
+fleetwright install-skill --user   # every project on this machine
 ```
 
 Writes the bundled skill where Claude Code will find it. After that you ask in
@@ -466,13 +466,13 @@ English, and Claude defines the work, enqueues it, spawns the workers **in one
 message so they run at once**, waits, and checks the database rather than the
 agents' own reports.
 
-The skill ships inside the wheel at `superagentic/skill/SKILL.md`, so there is
+The skill ships inside the wheel at `fleetwright/skill/SKILL.md`, so there is
 exactly one copy and it cannot drift from the CLI it documents.
 
 ### `demo`
 
 ```bash
-uvx superagentic demo
+uvx fleetwright demo
 ```
 
 Runs against a temporary database, so it is safe anywhere.
@@ -480,7 +480,7 @@ Runs against a temporary database, so it is safe anywhere.
 ## Python API
 
 ```python
-import superagentic as sa
+import fleetwright as sa
 
 conn = sa.connect("work.db")
 

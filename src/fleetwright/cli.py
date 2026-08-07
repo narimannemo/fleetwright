@@ -1,4 +1,4 @@
-"""`superagentic` — the command line.
+"""`fleetwright` — the command line.
 
 argparse rather than a CLI framework, because this package has no runtime
 dependencies and that is worth more than a prettier `--help`. It gets installed
@@ -8,7 +8,7 @@ opinions about their Click version.
 Exit codes are the interface here, not the text. `claim` exits 1 with no output
 when the queue is dry, so a shell loop terminates on its own:
 
-    while unit=$(superagentic claim extract --json); do … done
+    while unit=$(fleetwright claim extract --json); do … done
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def _cmd_skills(a: argparse.Namespace) -> int:
         print(json.dumps(rows, indent=2))
         return 0
     if not rows:
-        print("no skills registered — `superagentic skill <name> --source FILE`")
+        print("no skills registered — `fleetwright skill <name> --source FILE`")
         return 0
     w = max(len(r["name"]) for r in rows) + 2
     print(f"{'skill':<{w}}{'version':<10}{'digest':<18}{'units':>7}  source",
@@ -138,7 +138,7 @@ def _cmd_define(a: argparse.Namespace) -> int:
 def _cmd_start(a: argparse.Namespace) -> int:
     rid = leases.start_run(_conn(a), label=a.label, started_by=a.by,
                            note=a.note, run_id=a.id)
-    # The id alone on stdout, so `RUN=$(superagentic start ...)` works.
+    # The id alone on stdout, so `RUN=$(fleetwright start ...)` works.
     print(rid)
     print(f"run started: {a.label or rid}", file=sys.stderr)
     return 0
@@ -150,7 +150,7 @@ def _cmd_runs(a: argparse.Namespace) -> int:
         print(json.dumps(rows, indent=2))
         return 0
     if not rows:
-        print("no runs — `superagentic start --label ...` before enqueueing")
+        print("no runs — `fleetwright start --label ...` before enqueueing")
         return 0
     print(f"{'run':22}{'label':26}{'units':>7}{'done':>7}{'failed':>8}"
           f"{'left':>6}{'workers':>8}{'elapsed':>9}")
@@ -169,7 +169,7 @@ def _cmd_runs(a: argparse.Namespace) -> int:
 def _cmd_prompt(a: argparse.Namespace) -> int:
     conn = _conn(a)
     if a.kind and leases.spec(conn, a.kind) is None:
-        print(f"{a.kind!r} is not defined — `superagentic define {a.kind} …` first",
+        print(f"{a.kind!r} is not defined — `fleetwright define {a.kind} …` first",
               file=sys.stderr)
         return 2
     for i in range(1, a.n + 1):
@@ -298,7 +298,7 @@ def _cmd_add(a: argparse.Namespace) -> int:
         # Not an error — a bare queue is a legitimate use. But it is almost
         # always a forgotten `define`, and the worker finds out much later.
         print(f"  warning: {a.kind!r} has no instructions. Workers claiming "
-              f"these get a bare name. `superagentic define {a.kind} …`",
+              f"these get a bare name. `fleetwright define {a.kind} …`",
               file=sys.stderr)
     return 0
 
@@ -308,9 +308,9 @@ def _cmd_claim(a: argparse.Namespace) -> int:
     got = leases.claim(_conn(a), a.kind, worker=worker, lease=a.lease, n=a.n,
                        run=a.run,
                        max_attempts=a.max_attempts,
-                       model=a.model or os.environ.get("SUPERAGENTIC_MODEL"),
+                       model=a.model or os.environ.get("FLEETWRIGHT_MODEL"),
                        spawned_by=a.spawned_by
-                       or os.environ.get("SUPERAGENTIC_SPAWNED_BY"))
+                       or os.environ.get("FLEETWRIGHT_SPAWNED_BY"))
     if not got:
         if not a.json:
             print("nothing to claim", file=sys.stderr)
@@ -323,7 +323,7 @@ def _cmd_claim(a: argparse.Namespace) -> int:
                            "tools": u.tools, "brief": u.brief()} for u in got]))
         return 0
     if a.brief:
-        # For piping straight into an agent: `superagentic claim x --brief |
+        # For piping straight into an agent: `fleetwright claim x --brief |
         # claude -p -`. The whole assignment, nothing else on stdout.
         print("\n\n".join(u.brief() for u in got))
         return 0
@@ -427,7 +427,7 @@ def _cmd_done(a: argparse.Namespace) -> int:
         if unknown:
             print(f"--then names undefined kind(s): {', '.join(unknown)}",
                   file=sys.stderr)
-            print("  `superagentic define` them first; a unit with no "
+            print("  `fleetwright define` them first; a unit with no "
                   "instructions gives its worker a bare name.", file=sys.stderr)
             raise SystemExit(2)
     if leases.finish(conn, a.unit_id, worker=_who(a), token=a.token, note=a.note,
@@ -465,7 +465,7 @@ def _find_db(explicit: str) -> Path | None:
     """The database a fresh session should look at.
 
     A new arrival does not know a work.db exists, let alone what it is called.
-    If the default is not there, look for one: a superagentic database is
+    If the default is not there, look for one: a fleetwright database is
     recognisable by its tables, so this cannot pick up someone else's SQLite
     file by accident.
     """
@@ -494,11 +494,11 @@ def _find_db(explicit: str) -> Path | None:
 def _cmd_state(a: argparse.Namespace) -> int:
     db = _find_db(a.db)
     if db is None:
-        print(f"no superagentic database here (looked for {a.db} and *.db)")
+        print(f"no fleetwright database here (looked for {a.db} and *.db)")
         print()
         print("If this project has never used it:")
-        print("  superagentic install-skill   # then just ask Claude in English")
-        print("  superagentic init            # or set the work up yourself")
+        print("  fleetwright install-skill   # then just ask Claude in English")
+        print("  fleetwright init            # or set the work up yourself")
         return 0
     conn = leases.connect(db)
     st = leases.state(conn)
@@ -507,7 +507,7 @@ def _cmd_state(a: argparse.Namespace) -> int:
         return 0
 
     t = st["totals"]
-    print(f"superagentic {__version__} · {db}")
+    print(f"fleetwright {__version__} · {db}")
     print(f"  {t['all']:,} units: {t[leases.DONE]:,} done, {t[leases.FAILED]:,} "
           f"failed, {t[leases.OPEN]:,} waiting, {t[leases.LEASED]:,} in flight"
           + (f", {t[leases.CANCELLED]:,} cancelled" if t[leases.CANCELLED] else ""))
@@ -548,7 +548,7 @@ def _cmd_status(a: argparse.Namespace) -> int:
     conn = _conn(a)
     prog = leases.progress(conn, a.kind, run=a.run)
     if not prog:
-        print("no units queued — `superagentic add <kind> --from-file …`")
+        print("no units queued — `fleetwright add <kind> --from-file …`")
         return 0
     if a.json:
         print(json.dumps(prog, indent=2, sort_keys=True))
@@ -667,7 +667,7 @@ def _cmd_dashboard(a: argparse.Namespace) -> int:
         return 0
     # Env var as well as a flag: a token on the command line lands in shell
     # history and in `ps` output for anyone on the box.
-    token = a.token or os.environ.get("SUPERAGENTIC_TOKEN")
+    token = a.token or os.environ.get("FLEETWRIGHT_TOKEN")
     dashboard.serve([Path(x) for x in ([a.db] + (a.project or []))],
                     host=a.host, port=a.port, open_browser=not a.no_open,
                     token=token)
@@ -676,10 +676,10 @@ def _cmd_dashboard(a: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="superagentic",
+        prog="fleetwright",
         description="Work leases in one SQLite file, so a fleet of workers "
                     "divides a corpus instead of racing it.")
-    p.add_argument("--version", action="version", version=f"superagentic {__version__}")
+    p.add_argument("--version", action="version", version=f"fleetwright {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def common(sp):
@@ -805,7 +805,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "rather than claimed again")
     s.add_argument("--model", help="what you are, e.g. claude-opus-5. Recorded "
                                    "as declared -- nothing verifies it. "
-                                   "SUPERAGENTIC_MODEL also works.")
+                                   "FLEETWRIGHT_MODEL also works.")
     s.add_argument("--brief", action="store_true",
                    help="print the full assignment, for piping into an agent")
     # The one edge nothing here can observe. A subagent cannot see that a
@@ -816,7 +816,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--spawned-by", metavar="WHO",
                    help="who spawned this worker, e.g. the orchestrating "
                         "session. Declared, never measured. "
-                        "SUPERAGENTIC_SPAWNED_BY also works.")
+                        "FLEETWRIGHT_SPAWNED_BY also works.")
     s.set_defaults(fn=_cmd_claim)
 
     # `finish` at every layer. The library has always been finish(), the MCP
@@ -933,7 +933,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="loopback by default; off-loopback requires --token")
     s.add_argument("--project", action="append", metavar="PATH",
                    help="another database, or a directory of them; repeatable")
-    s.add_argument("--token", help="access token; prefer SUPERAGENTIC_TOKEN, "
+    s.add_argument("--token", help="access token; prefer FLEETWRIGHT_TOKEN, "
                                    "since a flag lands in shell history and ps")
     s.add_argument("--run", help="open on this run rather than everything")
     s.add_argument("--out", help="write a static snapshot instead of serving")
@@ -941,14 +941,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not open a browser")
     s.set_defaults(fn=_cmd_dashboard)
 
-    s = sub.add_parser("init", help="write a starter superagentic.toml")
-    s.add_argument("--file", default="superagentic.toml")
+    s = sub.add_parser("init", help="write a starter fleetwright.toml")
+    s.add_argument("--file", default="fleetwright.toml")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=_cmd_init)
 
     s = common(sub.add_parser(
         "apply", help="register skills and define kinds from a config file"))
-    s.add_argument("--file", default="superagentic.toml")
+    s.add_argument("--file", default="fleetwright.toml")
     s.add_argument("--run", help="enqueue declared units into this run")
     s.add_argument("--no-units", action="store_true",
                    help="apply skills and kinds only")
@@ -958,7 +958,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser(
         "install-skill",
-        help="teach Claude Code to run fleets: writes .claude/skills/superagentic")
+        help="teach Claude Code to run fleets: writes .claude/skills/fleetwright")
     s.add_argument("--user", action="store_true",
                    help="install for every project on this machine")
     s.add_argument("--force", action="store_true")
@@ -1030,7 +1030,7 @@ def _cmd_init(a: argparse.Namespace) -> int:
         return 1
     f.write_text(config.EXAMPLE, encoding="utf-8")
     print(f"wrote {f}")
-    print("  edit it, then: superagentic apply")
+    print("  edit it, then: fleetwright apply")
     return 0
 
 
@@ -1041,7 +1041,7 @@ def _cmd_apply(a: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(str(e), file=sys.stderr)
         if isinstance(e, FileNotFoundError):
-            print("  `superagentic init` writes a starter one.", file=sys.stderr)
+            print("  `fleetwright init` writes a starter one.", file=sys.stderr)
         return 2
     conn = _conn(a)
     try:
@@ -1067,13 +1067,13 @@ def _cmd_apply(a: argparse.Namespace) -> int:
 def _cmd_install_skill(a: argparse.Namespace) -> int:
     """Write the skill where Claude Code will find it.
 
-    This is the whole on-ramp. Before it, using superagentic meant reading the
+    This is the whole on-ramp. Before it, using fleetwright meant reading the
     docs and running five commands in the right order. After it, you install
     the tool, run this once, and then ask Claude in English to process a list
     of things with eight agents: the skill tells it how, and it does the rest.
     """
     from . import skill_text
-    dest = (Path.home() if a.user else Path.cwd()) / ".claude" / "skills" / "superagentic"
+    dest = (Path.home() if a.user else Path.cwd()) / ".claude" / "skills" / "fleetwright"
     target = dest / "SKILL.md"
     if target.exists() and not a.force:
         print(f"{target} already exists (use --force to overwrite)", file=sys.stderr)
@@ -1086,12 +1086,12 @@ def _cmd_install_skill(a: argparse.Namespace) -> int:
     print("Now ask Claude something like:")
     print('  "extract every claim from the 400 files in scans/, using 8 agents"')
     print("It will define the work, enqueue it, spawn the workers, and collect")
-    print("the results. `superagentic status --who` shows the fleet while it runs.")
+    print("the results. `fleetwright status --who` shows the fleet while it runs.")
     return 0
 
 
 # Last line in the file, deliberately. It used to sit two thirds of the way
-# down, so `python -m superagentic.cli` ran main() before the handlers below
+# down, so `python -m fleetwright.cli` ran main() before the handlers below
 # it were defined and died with `NameError: name '_cmd_init' is not defined`.
 # The console script was fine, because importing the module runs all of it
 # before anything calls main(), which is why nothing noticed.

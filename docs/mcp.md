@@ -3,7 +3,7 @@
 ```json
 {
   "mcpServers": {
-    "work": {"command": "superagentic", "args": ["serve", "--db", "work.db"]}
+    "work": {"command": "fleetwright", "args": ["serve", "--db", "work.db"]}
   }
 }
 ```
@@ -76,7 +76,7 @@ work runs two servers:
 
 ```json
 {"mcpServers": {
-  "work":   {"command": "superagentic", "args": ["serve", "--db", "work.db"]},
+  "work":   {"command": "fleetwright", "args": ["serve", "--db", "work.db"]},
   "claims": {"command": "xrad", "args": ["serve", "--db", "graph.db"]}
 }}
 ```

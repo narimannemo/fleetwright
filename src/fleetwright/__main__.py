@@ -1,4 +1,4 @@
-"""`python -m superagentic`, for when the console script is not on PATH.
+"""`python -m fleetwright`, for when the console script is not on PATH.
 
 A wheel installed with `pip install --target`, a zipapp, or a virtualenv whose
 bin directory is not exported all have the package importable and the command

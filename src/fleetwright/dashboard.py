@@ -1,7 +1,7 @@
 """A live view of the fleet, served from the standard library.
 
-    superagentic dashboard --db work.db          # http://127.0.0.1:8787
-    superagentic dashboard --out fleet.html      # a static snapshot
+    fleetwright dashboard --db work.db          # http://127.0.0.1:8787
+    fleetwright dashboard --out fleet.html      # a static snapshot
 
 The thing a queue's status line cannot tell you is whether the fleet is
 *healthy*. `12 left` is the same number whether four workers are moving through
@@ -369,7 +369,7 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 
 <div id="gate" hidden>
   <form class="gatebox" id="loginform">
-    <h1>superagentic</h1>
+    <h1>fleetwright</h1>
     <p class="muted">This dashboard is protected by an access token.</p>
     <input type="password" id="token" placeholder="access token" autocomplete="off"
            autofocus>
@@ -383,10 +383,10 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 <div class="shell" id="shell" hidden>
   <aside class="rail" id="rail">
     <div class="brand">
-      <span class="wordmark" aria-label="SuperAgentic">
-        <span class="wm-s">Super</span><span class="wm-a">Agentic</span></span>
+      <span class="wordmark" aria-label="fleetwright">
+        <span class="wm-s">fleet</span><span class="wm-a">wright</span></span>
       <span class="wordmark short" aria-hidden="true">
-        <span class="wm-s">S</span><span class="wm-a">A</span></span>
+        <span class="wm-s">f</span><span class="wm-a">w</span></span>
       <button class="collapse" id="collapse" title="Collapse sidebar"
               aria-label="Collapse sidebar">&#8249;</button>
     </div>
@@ -768,7 +768,7 @@ function renderRuns(d) {
   const rs = d.runs || [];
   if (!rs.length) {
     $("#runs").innerHTML = `<div class="empty">No runs yet. Start one with
-      <span class="mono">superagentic start --label "…"</span> and enqueue with
+      <span class="mono">fleetwright start --label "…"</span> and enqueue with
       <span class="mono">--run</span>.</div>`;
     $("#scope").innerHTML = "";
     return;
@@ -1001,7 +1001,7 @@ function render(d) {
         : esc(k.source || "—")}</td></tr>`).join("")}</table>`
     : `<div class="empty">No skills registered. A kind can require them with
        <span class="mono">--skill</span>, and
-       <span class="mono">superagentic skill &lt;name&gt; --source FILE</span>
+       <span class="mono">fleetwright skill &lt;name&gt; --source FILE</span>
        says what the name means.</div>`;
 
   const pm = d.per_model || [];
@@ -1183,7 +1183,7 @@ def _json_for_script(data: dict) -> str:
 
 
 def page(db: Path, data: dict | None = None) -> str:
-    return (PAGE.replace("__TITLE__", f"superagentic · {db.name}")
+    return (PAGE.replace("__TITLE__", f"fleetwright · {db.name}")
                 .replace("__DATA__", _json_for_script(data) if data else "null"))
 
 
@@ -1454,13 +1454,13 @@ def serve(db: Path | list[Path], *, host: str = "127.0.0.1", port: int = 8787,
             f"refusing to bind {host} without --token.\n"
             "  This serves queue contents and machine names over plain HTTP.\n"
             "  Either keep it on 127.0.0.1, or set a token:\n"
-            "      superagentic dashboard --host 0.0.0.0 --token \"$(openssl rand -hex 24)\"")
+            "      fleetwright dashboard --host 0.0.0.0 --token \"$(openssl rand -hex 24)\"")
     handler = type("Handler", (_Handler,), {
         "projects": projects, "token": token, "sessions": {}})
     with ThreadingHTTPServer((host, port), handler) as httpd:
         shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
         url = f"http://{shown}:{port}"
-        print(f"superagentic dashboard  {url}   (ctrl-c to stop)")
+        print(f"fleetwright dashboard  {url}   (ctrl-c to stop)")
         print(f"  projects: {', '.join(projects)}")
         if token:
             print("  access token required")

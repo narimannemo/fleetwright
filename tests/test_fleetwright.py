@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-import superagentic as sa
-from superagentic import cli
-from superagentic.cli import main as cli_main
-from superagentic.mcp import Server
+import fleetwright as sa
+from fleetwright import cli
+from fleetwright.cli import main as cli_main
+from fleetwright.mcp import Server
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -220,7 +220,7 @@ class TestRuns:
         sa.add(conn, "x", ["c"], run=r2)
         for u in sa.claim(conn, "x", worker="w", n=2, run=r1):
             sa.finish(conn, u.unit_id, worker="w")
-        from superagentic import leases
+        from fleetwright import leases
         assert leases.stats(conn, run=r1)["totals"]["done"] == 2
         assert leases.stats(conn, run=r2)["totals"]["done"] == 0
         assert leases.stats(conn)["totals"]["all"] == 3
@@ -288,7 +288,7 @@ class TestWorkerPrompt:
     def test_the_commands_it_prints_are_the_real_ones(self, conn, tmp_path):
         # A prompt that names a flag the CLI does not have is worse than no
         # prompt: the worker runs it, fails, and reports something confusing.
-        from superagentic.cli import build_parser
+        from fleetwright.cli import build_parser
         sa.define(conn, "x", instructions="go")
         p = sa.worker_prompt(conn, "x", db=str(tmp_path / "w.db"))
         import shlex
@@ -296,7 +296,7 @@ class TestWorkerPrompt:
         checked = 0
         for line in p.splitlines():
             line = line.strip()
-            if not line.startswith("superagentic "):
+            if not line.startswith("fleetwright "):
                 continue
             # shlex, not split(): `--result '<the JSON the brief asked for>'`
             # is ONE argument and naive splitting turns it into six.
@@ -310,7 +310,7 @@ class TestWorkerPrompt:
 
     def test_no_kind_still_produces_a_usable_prompt(self, conn):
         p = sa.worker_prompt(conn, db="w.db")
-        assert "superagentic claim --db w.db" in p
+        assert "fleetwright claim --db w.db" in p
 
 
 class TestResults:
@@ -449,7 +449,7 @@ class TestConcurrency:
         prog = (
             "import sys, json;"
             f"sys.path.insert(0, {src!r});"
-            "import superagentic as sa;"
+            "import fleetwright as sa;"
             f"c = sa.connect({str(db)!r});"
             "print(json.dumps([u.name for u in "
             "sa.claim(c, 'x', worker=sys.argv[1], n=20)]))"
@@ -502,7 +502,7 @@ class TestCLI:
 
     def test_status_on_an_empty_db_says_what_to_do_next(self, tmp_path, capsys):
         cli_main(["status", "--db", str(tmp_path / "w.db")])
-        assert "superagentic add" in capsys.readouterr().out
+        assert "fleetwright add" in capsys.readouterr().out
 
     def test_the_demo_runs_and_cleans_up_after_itself(self, capsys):
         """The cleanup half is the Windows half.
@@ -514,7 +514,7 @@ class TestCLI:
         """
         import tempfile
 
-        from superagentic.demo import main as demo
+        from fleetwright.demo import main as demo
         seen = []
         real = tempfile.TemporaryDirectory
 
@@ -614,15 +614,27 @@ class TestMCP:
 def commands_named_in(text: str) -> set[str]:
     r"""Commands a document actually invokes, not sentences about the product.
 
-    `superagentic (\w+)` also matches prose: "superagentic is the shared list"
-    yields `is`, and "superagentic exists to prevent" yields `exists`. Only a
-    line that starts with the command, or one written in backticks, is an
-    invocation.
+    `fleetwright (\w+)` also matches prose: "fleetwright is where both live"
+    yields `is`, and "fleetwright exists to prevent" yields `exists`. A
+    line-initial mention is only an invocation INSIDE A CODE FENCE -- outside
+    one it is just a sentence that happens to begin with the product name.
+    Elsewhere, backticks are the signal.
+
+    This used to allow a line-initial mention anywhere, with `as` hardcoded
+    into an allowlist to paper over the one instance that had come up. The
+    fence rule removes the whole class instead of the instances.
     """
     import re
-    found = (set(re.findall(r"^\s*superagentic ([\w-]+)", text, re.M))
-             | set(re.findall(r"`superagentic ([\w-]+)", text)))
-    # `superagentic 0.16.0 · work.db` in a sample of output is not a command
+    fenced, inside = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            fenced.append(line)
+    found = (set(re.findall(r"^\s*fleetwright ([\w-]+)", "\n".join(fenced), re.M))
+             | set(re.findall(r"`fleetwright ([\w-]+)", text)))
+    # `fleetwright 0.16.0 · work.db` in a sample of output is not a command
     # called `0`. Command names never start with a digit.
     return {c for c in found if not c[0].isdigit()}
 
@@ -635,10 +647,10 @@ class TestDocs:
         assert not missing, f"README links to missing files: {missing}"
 
     def test_the_reference_matches_the_cli(self):
-        from superagentic.cli import build_parser
+        from fleetwright.cli import build_parser
         real = set(build_parser()._subparsers._group_actions[0].choices)
         # The shared helper, so the digit filter and the invocation rule live
-        # in one place. Three copies of this regex is how `superagentic 0.16.0`
+        # in one place. Three copies of this regex is how `fleetwright 0.16.0`
         # in a sample of output became a command called `0`.
         doc = commands_named_in(
             (ROOT / "docs" / "reference.md").read_text(encoding="utf-8"))
@@ -649,24 +661,24 @@ class TestDocs:
         """The skill teaches agents shell commands. If one is renamed, the
         skill goes stale silently and every agent that reads it runs a command
         that does not exist."""
-        from superagentic.cli import build_parser
+        from fleetwright.cli import build_parser
         real = set(build_parser()._subparsers._group_actions[0].choices)
-        text = (ROOT / "src" / "superagentic" / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        text = (ROOT / "src" / "fleetwright" / "skill" / "SKILL.md").read_text(encoding="utf-8")
         used = commands_named_in(text) - {"serve"}
         assert not used - real, f"skill uses commands that do not exist: {sorted(used - real)}"
 
     def test_the_skill_names_every_mcp_tool_correctly(self):
-        from superagentic.mcp import _tools
+        from fleetwright.mcp import _tools
         real = {t["name"] for t in _tools()}
-        text = (ROOT / "src" / "superagentic" / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        text = (ROOT / "src" / "fleetwright" / "skill" / "SKILL.md").read_text(encoding="utf-8")
         named = set(re.findall(r"`(\w+_(?:job|jobs|kind|results|status))`", text))
         assert not named - real, f"skill names tools that do not exist: {sorted(named - real)}"
 
     def test_the_skill_has_the_frontmatter_that_makes_it_loadable(self):
-        text = (ROOT / "src" / "superagentic" / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        text = (ROOT / "src" / "fleetwright" / "skill" / "SKILL.md").read_text(encoding="utf-8")
         assert text.startswith("---\n"), "no frontmatter; the skill will not load"
         fm = text.split("---", 2)[1]
-        assert re.search(r"^name: superagentic$", fm, re.M)
+        assert re.search(r"^name: fleetwright$", fm, re.M)
         desc = re.search(r"^description: (.+)$", fm, re.M)
         assert desc, "no description — nothing decides when to offer the skill"
         # The description is the only thing that decides whether the skill is
@@ -687,7 +699,7 @@ class TestPackaging:
         sys.path.insert(0, str(ROOT / "packaging"))
         import brew_formula
         monkeypatch.setattr(brew_formula, "sdist", lambda v: (
-            f"https://files.pythonhosted.org/packages/ab/superagentic-{v}.tar.gz",
+            f"https://files.pythonhosted.org/packages/ab/fleetwright-{v}.tar.gz",
             "0" * 64,
             "Work leases in one SQLite file, so a fleet of agents divides a job "
             "list instead of racing it. Library, CLI and MCP server."))
@@ -700,14 +712,14 @@ class TestPackaging:
         # `#{bin}` is Ruby interpolation and `{bin}` is a str.format field.
         # Getting the escaping wrong produces a formula that installs and then
         # fails its own test block, in someone else's CI.
-        assert "#{bin}/superagentic" in out
+        assert "#{bin}/fleetwright" in out
         assert "{{" not in out and "#{{" not in out
 
     def test_the_formula_names_the_published_sdist_and_its_checksum(self, monkeypatch, capsys):
         out = self._formula(monkeypatch, capsys)
-        assert 'url "https://files.pythonhosted.org/packages/ab/superagentic-0.1.0.tar.gz"' in out
+        assert 'url "https://files.pythonhosted.org/packages/ab/fleetwright-0.1.0.tar.gz"' in out
         assert f'sha256 "{"0" * 64}"' in out
-        assert "class Superagentic < Formula" in out
+        assert "class Fleetwright < Formula" in out
 
     def test_desc_meets_homebrew_audit_rules(self, monkeypatch, capsys):
         desc = [ln for ln in self._formula(monkeypatch, capsys).splitlines()
@@ -716,7 +728,7 @@ class TestPackaging:
         assert not desc.endswith(("lis", "sever")) and desc.split()[-1] != "a", \
             "truncated mid-word; cut at a word boundary"
         assert not desc.endswith("."), "brew audit rejects a trailing full stop"
-        assert not desc.lower().startswith("superagentic"), \
+        assert not desc.lower().startswith("fleetwright"), \
             "brew audit rejects a desc starting with the formula name"
 
     def test_no_resource_blocks_because_there_are_no_dependencies(self, monkeypatch, capsys):
@@ -766,7 +778,7 @@ class _FakeHandler:
 
 class TestDashboard:
     def _stats(self, conn):
-        from superagentic import leases
+        from fleetwright import leases
         return leases.stats(conn)
 
     def test_a_finished_unit_records_how_long_it_took(self, conn):
@@ -809,7 +821,7 @@ class TestDashboard:
         assert d["p50"] < 5 and d["max"] > 25
 
     def test_the_page_is_self_contained(self, tmp_path):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "w.db"
         sa.add(sa.connect(db), "x", ["u1"])
         html = dashboard.snapshot(db)
@@ -821,7 +833,7 @@ class TestDashboard:
             [len("const DATA = "):].rsplit(";", 1)[0])["totals"]["all"] == 1
 
     def test_both_themes_are_defined_not_inverted(self, tmp_path):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "w.db"
         sa.add(sa.connect(db), "x", ["u1"])
         html = dashboard.snapshot(db)
@@ -848,7 +860,7 @@ class TestDashboard:
         So this one sets up the state the bug needs, drives the real routes,
         and compares the table contents rather than the file length.
         """
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "w.db"
         conn = sa.connect(db)
         run = sa.start_run(conn, label="live")
@@ -899,7 +911,7 @@ class TestDashboardAuth:
     """The login exists to make one mistake impossible, not to look secure."""
 
     def _serve(self, tmp_path, **kw):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "p.db"
         sa.add(sa.connect(db), "x", ["a"])
         return dashboard, db
@@ -938,16 +950,16 @@ class TestDashboardAuth:
     def test_a_wrong_token_is_compared_in_constant_time(self):
         # Not a timing measurement -- those are flaky. This asserts the code
         # uses compare_digest, because `==` on a secret leaks its prefix.
-        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        src = (ROOT / "src" / "fleetwright" / "dashboard.py").read_text(encoding="utf-8")
         assert "hmac.compare_digest" in src
         assert "== self.token" not in src and "self.token ==" not in src
 
     def test_the_session_cookie_is_httponly_and_samesite(self):
-        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        src = (ROOT / "src" / "fleetwright" / "dashboard.py").read_text(encoding="utf-8")
         assert "HttpOnly" in src and "SameSite=Strict" in src
 
     def test_projects_are_databases_and_a_directory_expands(self, tmp_path):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         (tmp_path / "d").mkdir()
         for n in ("alpha", "beta"):
             sa.connect(tmp_path / "d" / f"{n}.db")
@@ -956,7 +968,7 @@ class TestDashboardAuth:
         assert set(got) == {"alpha", "beta", "solo"}
 
     def test_the_page_renders_a_sidebar_and_a_gate(self, tmp_path):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "p.db"
         sa.add(sa.connect(db), "x", ["a"])
         html = dashboard.snapshot(db)
@@ -967,7 +979,7 @@ class TestDashboardAuth:
     def test_a_snapshot_carries_its_own_project(self, tmp_path):
         # Without this the static file renders an empty sidebar: `projects`
         # was only ever added by the request handler.
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "kircher.db"
         sa.add(sa.connect(db), "x", ["a"])
         html = dashboard.snapshot(db)
@@ -980,7 +992,7 @@ class TestDashboardAuth:
     def test_a_snapshot_never_asks_anyone_to_log_in(self, tmp_path):
         # There is no server behind a static file: showing a login form on one
         # would be asking for a credential nothing can check.
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "p.db"
         sa.add(sa.connect(db), "x", ["a"])
         html = dashboard.snapshot(db)
@@ -994,20 +1006,20 @@ class TestDashboardBrowser:
     def test_the_page_carries_its_own_favicon(self, tmp_path):
         # Without this the browser asks for /favicon.ico and logs a 404 that
         # looks like a bug in the tool.
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "p.db"
         sa.add(sa.connect(db), "x", ["u1"])
         html = dashboard.snapshot(db)
         assert 'rel="icon"' in html and "data:image/svg+xml," in html
 
     def test_favicon_ico_is_answered_rather_than_404(self):
-        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        src = (ROOT / "src" / "fleetwright" / "dashboard.py").read_text(encoding="utf-8")
         assert '"/favicon.ico"' in src
 
     def test_polling_stops_while_the_login_gate_is_up(self):
         """A gated page that keeps polling 401s every two seconds forever —
         a console full of errors and a request the server can only refuse."""
-        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        src = (ROOT / "src" / "fleetwright" / "dashboard.py").read_text(encoding="utf-8")
         assert "clearInterval(TIMER)" in src
         # And the interval must not be started unconditionally at load.
         assert "poll(); setInterval(poll, 2000);" not in src
@@ -1025,7 +1037,7 @@ class TestDashboardHiddenAttribute:
         """
         import re
 
-        from superagentic import dashboard
+        from fleetwright import dashboard
         css = dashboard.PAGE[dashboard.PAGE.index("<style>"):
                              dashboard.PAGE.index("</style>")]
         assert re.search(r"\[hidden\][^{]*\{[^}]*display\s*:\s*none\s*!important",
@@ -1036,7 +1048,7 @@ class TestDashboardHiddenAttribute:
         guard exists, so adding a new one cannot silently regress."""
         import re
 
-        from superagentic import dashboard
+        from fleetwright import dashboard
         page = dashboard.PAGE
         toggled = set(re.findall(r'id="(\w+)"[^>]*\shidden', page))
         assert {"gate", "shell"} <= toggled, toggled
@@ -1094,13 +1106,13 @@ class TestUnitsView:
 
 class TestDashboardChrome:
     def test_the_page_has_two_sidebars(self):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         assert 'aside class="rail"' in dashboard.PAGE
         assert 'aside class="second"' in dashboard.PAGE
         assert "grid-template-columns:196px 248px" in dashboard.PAGE
 
     def test_runs_live_in_the_second_sidebar_and_jobs_beside_them(self):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         page = dashboard.PAGE
         second = page[page.index('aside class="second"'):page.index('<div class="body">')]
         assert 'id="sideruns"' in second, "runs are not in the second sidebar"
@@ -1109,13 +1121,13 @@ class TestDashboardChrome:
     def test_sign_out_is_always_present_and_disabled_without_a_token(self):
         # Hiding it makes it look like a missing feature; a live one that ends
         # nothing is worse. So: present, disabled, and it says why.
-        from superagentic import dashboard
+        from fleetwright import dashboard
         page = dashboard.PAGE
         assert 'button class="signout" id="logout"' in page
         assert "lo.disabled = true" in page and "Nothing to sign out of" in page
 
     def test_the_jobs_endpoint_is_authenticated_like_everything_else(self):
-        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
+        src = (ROOT / "src" / "fleetwright" / "dashboard.py").read_text(encoding="utf-8")
         block = src[src.index('if path == "/api/units":'):src.index('if path == "/api":')]
         assert "self._authed()" in block and "auth_required" in block
 
@@ -1146,7 +1158,7 @@ class TestPaginationAndModel:
         assert sa.units(conn)["units"][0]["model"] == "definitely-not-a-real-model"
 
     def test_work_rolls_up_per_model(self, conn):
-        from superagentic import leases
+        from fleetwright import leases
         sa.add(conn, "x", [f"u{i}" for i in range(6)])
         for m, n in (("opus", 4), ("sonnet", 2)):
             for u in sa.claim(conn, "x", worker="w-" + m, n=n, model=m):
@@ -1167,14 +1179,14 @@ class TestPaginationAndModel:
 
 class TestRailAndVersion:
     def test_the_version_is_in_the_payload(self, tmp_path):
-        from superagentic import __version__, dashboard
+        from fleetwright import __version__, dashboard
         db = tmp_path / "p.db"
         sa.add(sa.connect(db), "x", ["u1"])
         html = dashboard.snapshot(db)
         assert f'"version": "{__version__}"' in html
 
     def test_the_rail_collapses_without_disappearing(self):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         page = dashboard.PAGE
         # Collapsed it must keep the toggle and the project buttons, or there
         # is no way back without knowing where to click.
@@ -1183,7 +1195,7 @@ class TestRailAndVersion:
         assert ".railshut .rail .navitem" in page
 
     def test_an_explicit_toggle_survives_a_resize(self):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         page = dashboard.PAGE
         assert "localStorage.setItem(RAIL_KEY" in page
         # Auto-collapse must not override a stored choice.
@@ -1194,15 +1206,15 @@ class TestBrandAndFreshness:
     def test_the_wordmark_is_type_not_an_embedded_image(self):
         """A raster logo would weigh on every page and every snapshot, and the
         snapshot is the artefact people mail to each other."""
-        from superagentic import dashboard
+        from fleetwright import dashboard
         page = dashboard.PAGE
-        assert 'class="wm-s">Super' in page and 'class="wm-a">Agentic' in page
+        assert 'class="wm-s">fleet' in page and 'class="wm-a">wright' in page
         assert "data:image/png" not in page and "data:image/jpeg" not in page
 
     def test_brand_colours_are_their_own_tokens(self):
         # Brand must never be reachable as state: nothing should be able to
         # render "critical" in the logo red by accident.
-        from superagentic import dashboard
+        from fleetwright import dashboard
         for t in ("--wm-ink", "--wm-red", "--wm-cream"):
             assert t in dashboard.PAGE
         css = dashboard.PAGE[:dashboard.PAGE.index("</style>")]
@@ -1210,20 +1222,20 @@ class TestBrandAndFreshness:
             assert f"var({state})" not in css.split(".wordmark")[1].split("}")[0]
 
     def test_the_collapsed_rail_still_shows_a_mark(self):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         assert ".railshut .rail .wordmark.short { display:inline; }" in dashboard.PAGE
 
     def test_the_freshness_indicator_says_what_it_is(self):
         """It used to render a bare clock time beside a dot, which reads as a
         timer. Nobody could tell what it counted."""
-        from superagentic import dashboard
+        from fleetwright import dashboard
         page = dashboard.PAGE
         assert "updated just now" in page and "not yet updated" in page
         # The old line rendered a bare clock into the sidebar with no label.
         assert "const when = new Date(d.now * 1000).toLocaleTimeString();" not in page
 
     def test_freshness_ticks_locally_so_a_dead_server_shows(self):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         assert "setInterval(tickFreshness, 1000)" in dashboard.PAGE
         assert "secs > 10" in dashboard.PAGE
 
@@ -1287,13 +1299,13 @@ class TestSkillRegistry:
         assert {s["name"]: s["units"] for s in sa.skills(conn)}["unused"] == 0
 
     def test_the_registry_never_fetches_anything(self):
-        src = (ROOT / "src" / "superagentic" / "leases.py").read_text(encoding="utf-8")
+        src = (ROOT / "src" / "fleetwright" / "leases.py").read_text(encoding="utf-8")
         for net in ("urllib", "requests", "httpx", "socket.create_connection",
                     "urlopen"):
             assert net not in src, f"leases.py reaches the network via {net!r}"
 
     def test_a_kind_naming_unregistered_skills_is_flagged_over_mcp(self, tmp_path):
-        from superagentic.mcp import Server
+        from fleetwright.mcp import Server
         s = Server(tmp_path / "w.db")
         out = s.define_kind({"kind": "x", "instructions": "go",
                              "done_when": "d", "skills": ["ghost"]})
@@ -1323,7 +1335,7 @@ class TestLicenceBoundary:
         # anyway. Only the explicit exclude stops it.
         assert "ee" in sdist.get("exclude", []), "no exclude for ee/"
         pkgs = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
-        assert pkgs == ["src/superagentic"], pkgs
+        assert pkgs == ["src/fleetwright"], pkgs
 
         # And check the ARTEFACTS when they exist, because the config passing
         # is what let this through the first time.
@@ -1339,7 +1351,7 @@ class TestLicenceBoundary:
     def test_no_import_of_ee_from_the_core(self):
         """The core must run complete without `ee/`. If it imports from there,
         the Apache-2.0 half is not actually a working tool."""
-        for f in (ROOT / "src" / "superagentic").glob("*.py"):
+        for f in (ROOT / "src" / "fleetwright").glob("*.py"):
             src = f.read_text(encoding="utf-8")
             assert "import ee" not in src and "from ee" not in src, f.name
 
@@ -1384,7 +1396,7 @@ class TestReadmeIsTrue:
     def test_the_mcp_tool_count_is_right(self):
         import re
 
-        from superagentic.mcp import _tools
+        from fleetwright.mcp import _tools
         words = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
                  "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
                  "eighteen": 18}
@@ -1396,8 +1408,8 @@ class TestReadmeIsTrue:
     def test_every_tool_and_command_named_exists(self):
         import re
 
-        from superagentic.cli import build_parser
-        from superagentic.mcp import _tools
+        from fleetwright.cli import build_parser
+        from fleetwright.mcp import _tools
         r = self._readme()
         real = {t["name"] for t in _tools()}
         named = set(re.findall(
@@ -1405,8 +1417,8 @@ class TestReadmeIsTrue:
         assert not named - real, sorted(named - real)
         cmds = commands_named_in(r)
         realc = set(build_parser()._subparsers._group_actions[0].choices)
-        # "as" comes from "install superagentic ... as a library".
-        assert not cmds - realc - {"as"}, sorted(cmds - realc - {"as"})
+        # "as" comes from "install fleetwright ... as a library".
+        assert not cmds - realc, sorted(cmds - realc)
 
     def test_the_zero_dependency_claim_is_true(self):
         import tomllib
@@ -1417,15 +1429,15 @@ class TestReadmeIsTrue:
 
     def test_the_wordmark_is_committed_and_renders_without_a_style_block(self):
         import xml.dom.minidom
-        svg = ROOT / "assets" / "superagentic.svg"
+        svg = ROOT / "assets" / "fleetwright.svg"
         assert svg.exists(), "README references a wordmark that is not in the repo"
-        assert 'src="assets/superagentic.svg"' in self._readme()
+        assert 'src="assets/fleetwright.svg"' in self._readme()
         d = xml.dom.minidom.parse(str(svg))
         els = {n.tagName for n in d.getElementsByTagName("*")}
         # GitHub strips <style> from SVG rendered in a README, so the wordmark
         # has to carry presentation attributes or it renders as black text.
         assert "style" not in els, "SVG uses a <style> block; GitHub will strip it"
-        assert 'alt="SuperAgentic"' in self._readme(), \
+        assert 'alt="fleetwright"' in self._readme(), \
             "no alt text; PyPI cannot resolve the relative path and shows nothing"
 
     def test_no_em_dashes(self):
@@ -1512,7 +1524,7 @@ class TestCLIWiring:
         import inspect
         import re
 
-        from superagentic import cli
+        from fleetwright import cli
         parser = cli.build_parser()
         unread = []
         for name, sp in parser._subparsers._group_actions[0].choices.items():
@@ -1546,7 +1558,7 @@ class TestCLIWiring:
     def test_the_brief_names_a_command_that_exists(self):
         import re
 
-        from superagentic.cli import build_parser
+        from fleetwright.cli import build_parser
         conn = sa.connect(":memory:")
         sa.define(conn, "x", instructions="go")
         sa.add(conn, "x", ["u"])
@@ -1614,7 +1626,7 @@ class TestShapeChecking:
     turn a legitimate prose description into a failure."""
 
     def test_prose_returns_disables_checking(self):
-        from superagentic import shape
+        from fleetwright import shape
         for prose in ("a sentence about what you found", "", None,
                       "the number of claims"):
             assert shape.parse(prose) is None
@@ -1624,12 +1636,12 @@ class TestShapeChecking:
         """`<int>` and `"<string>"` are both natural to write. Quoting the
         already-quoted one produced `""<string>""`, which fails to parse, so
         every shape silently became 'no shape' and nothing was checked."""
-        from superagentic import shape
+        from fleetwright import shape
         t = shape.parse('{"claims": <int>, "notes": "<string>"}')
         assert t == {"claims": "<int>", "notes": "<string>"}
 
     def test_the_failures_that_matter(self):
-        from superagentic import shape
+        from fleetwright import shape
         t = '{"claims": <int>, "notes": "<string>"}'
         assert shape.describe(t, "a bare string")
         assert shape.describe(t, {"notes": "x"})            # missing key
@@ -1638,16 +1650,16 @@ class TestShapeChecking:
     def test_extra_keys_are_allowed(self):
         # Returning more than promised breaks nothing, and refusing it would
         # punish the useful habit of including context.
-        from superagentic import shape
+        from fleetwright import shape
         assert shape.describe('{"claims": <int>}',
                               {"claims": 1, "why": "because"}) == []
 
     def test_a_bool_is_not_an_int(self):
-        from superagentic import shape
+        from fleetwright import shape
         assert shape.describe('{"n": <int>}', {"n": True})
 
     def test_optional_keys(self):
-        from superagentic import shape
+        from fleetwright import shape
         t = '{"claims": <int>, "tags?": ["<string>"]}'
         assert shape.describe(t, {"claims": 1}) == []
         assert shape.describe(t, {"claims": 1, "tags": ["a"]}) == []
@@ -1655,7 +1667,7 @@ class TestShapeChecking:
 
     def test_every_problem_is_reported_at_once(self):
         # An agent told about one problem at a time will redo the work twice.
-        from superagentic import shape
+        from fleetwright import shape
         p = shape.describe('{"a": <int>, "b": <int>, "c": <int>}',
                            {"a": "x", "b": "y"})
         assert len(p) == 3
@@ -1687,7 +1699,7 @@ class TestShapeChecking:
                          "--no-check", "--result", '"wrong"']) == 0
 
     def test_mcp_reports_rather_than_raises(self, tmp_path):
-        from superagentic.mcp import Server
+        from fleetwright.mcp import Server
         s = Server(tmp_path / "w.db")
         s.define_kind({"kind": "k", "instructions": "go", "done_when": "d",
                        "returns": '{"claims": <int>}'})
@@ -1801,7 +1813,7 @@ class TestWaitRetryCancel:
     def test_every_status_is_counted_somewhere(self, conn):
         """Adding a status and forgetting a consumer is how a total silently
         stops adding up."""
-        from superagentic import leases
+        from fleetwright import leases
         sa.add(conn, "k", ["a", "b", "c", "d"])
         sa.cancel(conn, kind="k", names=["d"])
         u = sa.claim(conn, "k", worker="w")[0]
@@ -1817,7 +1829,7 @@ class TestStatusShowsEverything:
         """`cancelled` shipped invisible: the table had a hand-written list of
         columns and the new status was not in it, so three units vanished from
         a row that no longer added up."""
-        from superagentic import leases
+        from fleetwright import leases
         db = str(tmp_path / "w.db")
         cli_main(["add", "k", "a", "b", "c", "--db", db])
         conn = sa.connect(db)
@@ -1841,14 +1853,14 @@ class TestInstallSkill:
     def test_it_writes_where_claude_code_looks(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
         assert cli_main(["install-skill"]) == 0
-        target = tmp_path / ".claude" / "skills" / "superagentic" / "SKILL.md"
+        target = tmp_path / ".claude" / "skills" / "fleetwright" / "SKILL.md"
         assert target.exists()
-        assert target.read_text(encoding="utf-8").startswith("---\nname: superagentic")
+        assert target.read_text(encoding="utf-8").startswith("---\nname: fleetwright")
 
     def test_it_refuses_to_clobber_without_force(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
         cli_main(["install-skill"])
-        target = tmp_path / ".claude" / "skills" / "superagentic" / "SKILL.md"
+        target = tmp_path / ".claude" / "skills" / "fleetwright" / "SKILL.md"
         target.write_text("mine, edited", encoding="utf-8")
         assert cli_main(["install-skill"]) == 1
         assert target.read_text(encoding="utf-8") == "mine, edited"
@@ -1858,8 +1870,8 @@ class TestInstallSkill:
     def test_the_skill_is_readable_from_the_installed_package(self):
         # It must live inside the wheel, or install-skill cannot write it for
         # anyone who installed from PyPI rather than from a clone.
-        import superagentic
-        text = superagentic.skill_text()
+        import fleetwright
+        text = fleetwright.skill_text()
         assert "spawn" in text.lower() and len(text) > 2000
 
     def test_there_is_exactly_one_copy_of_the_skill(self):
@@ -1873,17 +1885,17 @@ class TestInstallSkill:
     def test_the_skill_tells_claude_to_spawn_in_one_message(self):
         # Spawning in separate messages makes the fleet a fleet of one, and it
         # is the single easiest mistake for an orchestrator to make.
-        import superagentic
-        t = superagentic.skill_text()
+        import fleetwright
+        t = fleetwright.skill_text()
         assert "ONE message" in t
         assert "separate messages" in t
 
     def test_the_skill_only_names_real_commands(self):
 
-        import superagentic
-        from superagentic.cli import build_parser
+        import fleetwright
+        from fleetwright.cli import build_parser
         real = set(build_parser()._subparsers._group_actions[0].choices)
-        used = commands_named_in(superagentic.skill_text())
+        used = commands_named_in(fleetwright.skill_text())
         assert not used - real - {"serve"}, sorted(used - real - {"serve"})
 
 
@@ -1899,7 +1911,7 @@ class TestCostAndTokens:
                           tokens_in=3000, tokens_out=900)
 
     def test_cost_rolls_up_per_model(self, conn):
-        from superagentic import leases
+        from fleetwright import leases
         self._fleet(conn)
         by = {m["model"]: m for m in leases.stats(conn)["per_model"]}
         assert round(by["opus"]["cost"], 3) == 0.093
@@ -1909,7 +1921,7 @@ class TestCostAndTokens:
     def test_the_average_is_over_units_that_reported(self, conn):
         # A mean over everything would quietly divide by units that never said
         # anything, and read as if the run were cheaper than it was.
-        from superagentic import leases
+        from fleetwright import leases
         sa.add(conn, "x", ["a", "b"])
         got = sa.claim(conn, "x", worker="w", n=2, model="m")
         sa.finish(conn, got[0].unit_id, worker="w", cost=1.0)
@@ -1918,7 +1930,7 @@ class TestCostAndTokens:
         assert m["priced"] == 1 and m["cost"] == 1.0
 
     def test_totals_say_how_much_of_the_run_reported(self, conn):
-        from superagentic import leases
+        from fleetwright import leases
         self._fleet(conn)
         c = leases.stats(conn)["cost"]
         assert c["priced"] == 6 and c["units"] == 6
@@ -1949,12 +1961,12 @@ class TestCostAndTokens:
 
 class TestConfigFile:
     def _write(self, tmp_path, body):
-        f = tmp_path / "superagentic.toml"
+        f = tmp_path / "fleetwright.toml"
         f.write_text(body, encoding="utf-8")
         return f
 
     def test_apply_registers_skills_and_defines_kinds(self, tmp_path):
-        from superagentic import config
+        from fleetwright import config
         (tmp_path / "s.md").write_text("text", encoding="utf-8")
         f = self._write(tmp_path, '''
 [skills.sk]
@@ -1978,7 +1990,7 @@ skills = ["sk"]
     def test_applying_twice_is_a_no_op(self, tmp_path):
         # A config you are afraid to re-apply is one people stop applying, and
         # then it stops describing what is actually running.
-        from superagentic import config
+        from fleetwright import config
         f = self._write(tmp_path, '[kinds.k]\ninstructions = "go"\ndone_when = "d"\n')
         conn = sa.connect(tmp_path / "w.db")
         config.apply(conn, config.load(f), root=tmp_path)
@@ -1986,20 +1998,20 @@ skills = ["sk"]
         assert len([r for r in conn.execute("SELECT kind FROM kind")]) == 1
 
     def test_a_kind_without_instructions_is_refused(self, tmp_path):
-        from superagentic import config
+        from fleetwright import config
         f = self._write(tmp_path, '[kinds.k]\ndone_when = "d"\n')
         with pytest.raises(ValueError, match="no instructions"):
             config.apply(sa.connect(tmp_path / "w.db"), config.load(f), root=tmp_path)
 
     def test_missing_done_when_and_unregistered_skills_warn(self, tmp_path):
-        from superagentic import config
+        from fleetwright import config
         f = self._write(tmp_path, '[kinds.k]\ninstructions = "go"\nskills = ["ghost"]\n')
         out = config.apply(sa.connect(tmp_path / "w.db"), config.load(f), root=tmp_path)
         joined = " ".join(out["warnings"])
         assert "done_when" in joined and "ghost" in joined
 
     def test_units_come_from_a_file_or_a_glob_without_duplicates(self, tmp_path):
-        from superagentic import config
+        from fleetwright import config
         (tmp_path / "scans").mkdir()
         for n in ("a.png", "b.png"):
             (tmp_path / "scans" / n).touch()
@@ -2017,26 +2029,26 @@ meta = { path = "scans/$name" }
         assert meta == {"path": "scans/$name"}
 
     def test_a_broken_file_says_what_is_wrong(self, tmp_path):
-        from superagentic import config
+        from fleetwright import config
         f = self._write(tmp_path, "[kinds.k\ninstructions = 'go'")
         with pytest.raises(ValueError) as e:
             config.load(f)
-        assert "superagentic.toml" in str(e.value)
+        assert "fleetwright.toml" in str(e.value)
 
     def test_init_writes_something_apply_accepts(self, tmp_path, monkeypatch):
-        from superagentic import config
+        from fleetwright import config
         monkeypatch.chdir(tmp_path)
         assert cli_main(["init"]) == 0
-        cfg = config.load(tmp_path / "superagentic.toml")
+        cfg = config.load(tmp_path / "fleetwright.toml")
         out = config.apply(sa.connect(tmp_path / "w.db"), cfg, root=tmp_path)
         assert out["kinds"] == ["extract"]
 
     def test_init_refuses_to_clobber(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         cli_main(["init"])
-        (tmp_path / "superagentic.toml").write_text("mine", encoding="utf-8")
+        (tmp_path / "fleetwright.toml").write_text("mine", encoding="utf-8")
         assert cli_main(["init"]) == 1
-        assert (tmp_path / "superagentic.toml").read_text(encoding="utf-8") == "mine"
+        assert (tmp_path / "fleetwright.toml").read_text(encoding="utf-8") == "mine"
 
     def test_apply_without_a_file_points_at_init(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
@@ -2097,7 +2109,7 @@ class TestResultsOutput:
         assert isinstance(sa.iter_results(conn, "k"), types.GeneratorType)
 
     def test_failures_can_be_included(self, conn):
-        from superagentic import leases
+        from fleetwright import leases
         sa.add(conn, "k", ["bad"])
         for _ in range(3):
             u = sa.claim(conn, "k", worker="w")[0]
@@ -2216,7 +2228,7 @@ class TestKindVersioning:
                          "--done-when", "d", "--force"]) == 0
 
     def test_mcp_reports_the_refusal_rather_than_raising(self, tmp_path):
-        from superagentic.mcp import Server
+        from fleetwright.mcp import Server
         s = Server(tmp_path / "w.db")
         s.define_kind({"kind": "k", "instructions": "a", "done_when": "d"})
         s.add_jobs({"kind": "k", "names": ["u"]})
@@ -2248,7 +2260,7 @@ class TestProjectState:
         c.close()
         capsys.readouterr()
         cli_main(["state"])
-        assert "no superagentic database" in capsys.readouterr().out
+        assert "no fleetwright database" in capsys.readouterr().out
 
     def test_an_empty_project_is_told_how_to_start(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
@@ -2296,15 +2308,15 @@ class TestProjectState:
         assert sa.state(conn)["totals"]["ungrouped"] == 1
 
     def test_mcp_exposes_it_and_says_to_call_it_first(self, tmp_path):
-        from superagentic.mcp import Server, _tools
+        from fleetwright.mcp import Server, _tools
         t = next(x for x in _tools() if x["name"] == "project_state")
         assert "FIRST" in t["description"]
         s = Server(tmp_path / "w.db")
         assert "next" in s.project_state({})
 
     def test_the_skill_tells_a_new_session_to_orient(self):
-        import superagentic
-        assert "superagentic state" in superagentic.skill_text()
+        import fleetwright
+        assert "fleetwright state" in fleetwright.skill_text()
 
 
 class TestLineage:
@@ -2403,7 +2415,7 @@ class TestTimeline:
         assert sa.timeline(conn)["lanes"][0]["spawned_by"] == "session-a"
 
     def test_the_dashboard_hides_the_flow_panel_when_nothing_chains(self):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         assert '$("#flowcard").hidden = !fl.length' in dashboard.PAGE
 
 
@@ -2480,7 +2492,7 @@ class TestSpawnedBy:
         cli_main(["define", "ex", "--db", db, "--instructions", "x",
                   "--done-when", "y"])
         cli_main(["add", "ex", "--db", db, "p1"])
-        monkeypatch.setenv("SUPERAGENTIC_SPAWNED_BY", "session-b")
+        monkeypatch.setenv("FLEETWRIGHT_SPAWNED_BY", "session-b")
         cli_main(["claim", "ex", "--db", db, "--worker", "w0"])
         conn = sa.connect(db)
         assert conn.execute(
@@ -2511,7 +2523,7 @@ class TestNothingIsLibraryOnly:
     }
 
     def test_every_keyword_can_be_set_from_the_command_line(self):
-        import superagentic.leases as L
+        import fleetwright.leases as L
         pairs = [("add", L.add), ("claim", L.claim), ("finish", L.finish),
                  ("fail", L.fail), ("release", L.release), ("define", L.define),
                  ("retry", L.retry), ("cancel", L.cancel),
@@ -2629,26 +2641,26 @@ class TestRunAsAModule:
     """`python -m` must work, and only a subprocess can prove it.
 
     Importing the module runs every definition before anything calls `main()`,
-    so the console script worked while `python -m superagentic.cli` died on a
+    so the console script worked while `python -m fleetwright.cli` died on a
     `NameError` for a handler defined below the `__main__` guard. No in-process
     test can see this: by the time the test calls `main`, the import is done.
     """
 
     def test_the_cli_module_runs(self):
-        r = subprocess.run([sys.executable, "-m", "superagentic.cli",
+        r = subprocess.run([sys.executable, "-m", "fleetwright.cli",
                             "--version"], capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
-        assert "superagentic" in r.stdout
+        assert "fleetwright" in r.stdout
 
     def test_the_package_runs(self):
-        r = subprocess.run([sys.executable, "-m", "superagentic", "--version"],
+        r = subprocess.run([sys.executable, "-m", "fleetwright", "--version"],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
-        assert "superagentic" in r.stdout
+        assert "fleetwright" in r.stdout
 
     def test_a_real_command_runs(self, tmp_path):
         """--version short-circuits argparse; this reaches a handler."""
-        r = subprocess.run([sys.executable, "-m", "superagentic", "init",
+        r = subprocess.run([sys.executable, "-m", "fleetwright", "init",
                             "--file", str(tmp_path / "s.toml")],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
@@ -2667,7 +2679,7 @@ class TestEveryColourIsReal:
     """
 
     def _css(self):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         return dashboard.page(Path("x.db"))
 
     def test_no_declaration_names_a_token_that_does_not_exist(self):
@@ -2984,7 +2996,7 @@ class TestPinning:
         nothing the first time, which is exactly what a kind missing from the
         pre-read looks like.
         """
-        import superagentic.leases as L
+        import fleetwright.leases as L
         conn = sa.connect(str(tmp_path / "w.db"))
         sa.define(conn, "k", "V1", done_when="d")
         sa.add(conn, "k", ["u1"])
@@ -3010,7 +3022,7 @@ class TestPinning:
         that cannot fail is worse than none. So this checks the predicate is
         written, and says plainly that is all it checks.
         """
-        src = (ROOT / "src" / "superagentic" / "leases.py").read_text(
+        src = (ROOT / "src" / "fleetwright" / "leases.py").read_text(
             encoding="utf-8")
         fallback = src.split("# A kind enqueued between the pre-read")[1][:900]
         assert "AND lease_token = ?" in fallback
@@ -3138,7 +3150,7 @@ class TestMcpSurvivesBadFrames:
     def _serve(self, tmp_path, frames):
         import io
 
-        from superagentic.mcp import Server
+        from fleetwright.mcp import Server
         out = io.StringIO()
         Server(str(tmp_path / "w.db")).serve(io.StringIO(frames), out)
         return [json.loads(ln) for ln in out.getvalue().splitlines() if ln.strip()]
@@ -3177,7 +3189,7 @@ class TestMcpSurvivesBadFrames:
         assert [r["id"] for r in replies[0]] == [1]
 
     def test_initialize_echoes_a_version_it_speaks(self, tmp_path):
-        from superagentic.mcp import Server
+        from fleetwright.mcp import Server
         srv = Server(str(tmp_path / "w.db"))
         r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                         "params": {"protocolVersion": "2025-06-18"}})
@@ -3193,7 +3205,7 @@ class TestSnapshotEscaping:
     XSS = '</script><img src=x onerror=alert(1)>'
 
     def _snapshot_with(self, tmp_path, **where):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "w.db"
         conn = sa.connect(db)
         run = sa.start_run(conn, label=where.get("label", "run"))
@@ -3231,7 +3243,7 @@ class TestSnapshotEscaping:
 class TestDashboardParams:
 
     def test_a_malformed_limit_is_a_400_not_a_dropped_connection(self, tmp_path):
-        from superagentic import dashboard
+        from fleetwright import dashboard
         db = tmp_path / "w.db"
         sa.add(sa.connect(db), "k", ["u1"])
         body = _FakeHandler(dashboard, db).get("/api/units?limit=abc")
@@ -3239,9 +3251,9 @@ class TestDashboardParams:
 
     def test_sessions_expire_server_side(self, tmp_path):
         """The cookie said Max-Age=86400 and the server kept the id forever."""
-        from superagentic import dashboard
+        from fleetwright import dashboard
         assert dashboard.SESSION_SECONDS == 86400
-        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(
+        src = (ROOT / "src" / "fleetwright" / "dashboard.py").read_text(
             encoding="utf-8")
         assert "SESSION_SECONDS" in src.split("def _authed")[1][:400], (
             "_authed does not check age, so an expired cookie still works")

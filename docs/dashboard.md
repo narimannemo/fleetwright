@@ -1,9 +1,9 @@
 # Watching a fleet
 
 ```bash
-superagentic dashboard --db work.db                     # http://127.0.0.1:8787
-superagentic dashboard --db a.db --project ./queues     # several projects
-superagentic dashboard --db work.db --out fleet.html    # a static snapshot
+fleetwright dashboard --db work.db                     # http://127.0.0.1:8787
+fleetwright dashboard --db a.db --project ./queues     # several projects
+fleetwright dashboard --db work.db --out fleet.html    # a static snapshot
 ```
 
 The layout is a sidebar and a detail pane: **projects** at the top, **runs**
@@ -19,15 +19,15 @@ moving or deleting it would break the rest; the filename is already the name
 people use.
 
 ```bash
-superagentic dashboard --db kircher.db --project plutarch.db
-superagentic dashboard --db kircher.db --project ./queues   # a directory of them
+fleetwright dashboard --db kircher.db --project plutarch.db
+fleetwright dashboard --db kircher.db --project ./queues   # a directory of them
 ```
 
 ## The login, and what it is not
 
 ```bash
-export SUPERAGENTIC_TOKEN="$(openssl rand -hex 24)"
-superagentic dashboard --db work.db --host 0.0.0.0
+export FLEETWRIGHT_TOKEN="$(openssl rand -hex 24)"
+fleetwright dashboard --db work.db --host 0.0.0.0
 ```
 
 It is a **shared access token, not user accounts.** There is no user model in
@@ -43,11 +43,11 @@ correct prefix through timing, and exchanged for a session cookie that is
 > set**, and warns on every start when it binds off-loopback anyway.
 
 ```
-$ superagentic dashboard --host 0.0.0.0
+$ fleetwright dashboard --host 0.0.0.0
 refusing to bind 0.0.0.0 without --token.
   This serves queue contents and machine names over plain HTTP.
   Either keep it on 127.0.0.1, or set a token:
-      superagentic dashboard --host 0.0.0.0 --token "$(openssl rand -hex 24)"
+      fleetwright dashboard --host 0.0.0.0 --token "$(openssl rand -hex 24)"
 ```
 
 That refusal is the entire security design. A login form whose real effect is
@@ -61,7 +61,7 @@ terminates TLS. This does not try to be that proxy.
 
 ## What it is for
 
-`superagentic status` gives you a number:
+`fleetwright status` gives you a number:
 
 ```
 kind        open  leased    done  failed    left
@@ -103,10 +103,10 @@ was. Paginated at 100 a page, and the page number lives in the URL.
 A worker can say what it is when it claims:
 
 ```bash
-superagentic claim extract --worker agent-1 --model claude-opus-5
+fleetwright claim extract --worker agent-1 --model claude-opus-5
 ```
 
-or `model` on `claim_job` over MCP, or `SUPERAGENTIC_MODEL` in the environment.
+or `model` on `claim_job` over MCP, or `FLEETWRIGHT_MODEL` in the environment.
 
 It is **declared, never detected.** Nothing here can verify it, and pretending
 otherwise would make it evidence when it is only a label. It earns a column
@@ -168,13 +168,13 @@ tolerated rather than assumed away, since nothing stops an `audit` kind
 enqueueing back into `extract`.
 
 **One node per kind, not per unit.** 255 unit nodes is a hairball and 400,000
-is a dead browser tab. For a single unit, `superagentic lineage <unit_id>`
+is a dead browser tab. For a single unit, `fleetwright lineage <unit_id>`
 walks its own chain in both directions.
 
 The exact counts stay in a list underneath, which is also the reading that does
 not depend on colour.
 
-For a single unit, `superagentic lineage <unit_id>` walks the chain in both
+For a single unit, `fleetwright lineage <unit_id>` walks the chain in both
 directions.
 
 ### Six tiles — *where does this stand?*
@@ -255,7 +255,7 @@ and the viewer's own toggle wins over the OS preference.
 ## The snapshot
 
 ```bash
-superagentic dashboard --db work.db --out fleet.html
+fleetwright dashboard --db work.db --out fleet.html
 ```
 
 One self-contained file with the data baked in — nothing fetched, no server, no
@@ -265,7 +265,7 @@ fleet that finished hours ago.
 ## From Python
 
 ```python
-from superagentic import leases
+from fleetwright import leases
 s = leases.stats(conn)
 
 s["totals"]          # {open, leased, done, failed, all, left}

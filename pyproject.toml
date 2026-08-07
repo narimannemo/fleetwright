@@ -1,5 +1,5 @@
 [project]
-name = "superagentic"
+name = "fleetwright"
 dynamic = ["version"]
 description = "Work leases in one SQLite file, so a fleet of agents divides a job list instead of racing it. Library, CLI and MCP server, zero dependencies."
 readme = "README.md"
@@ -30,13 +30,13 @@ dependencies = []
 dev = ["pytest>=8.3", "ruff>=0.6"]
 
 [project.urls]
-Homepage = "https://github.com/narimannemo/superagentic"
-Documentation = "https://github.com/narimannemo/superagentic/tree/main/docs"
-Issues = "https://github.com/narimannemo/superagentic/issues"
-Changelog = "https://github.com/narimannemo/superagentic/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/narimannemo/fleetwright"
+Documentation = "https://github.com/narimannemo/fleetwright/tree/main/docs"
+Issues = "https://github.com/narimannemo/fleetwright/issues"
+Changelog = "https://github.com/narimannemo/fleetwright/blob/main/CHANGELOG.md"
 
 [project.scripts]
-superagentic = "superagentic.cli:main"
+fleetwright = "fleetwright.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -46,17 +46,17 @@ build-backend = "hatchling.build"
 # and the failure is a wheel whose metadata disagrees with what the code
 # reports -- visible only to whoever debugs it later.
 [tool.hatch.version]
-path = "src/superagentic/__init__.py"
+path = "src/fleetwright/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/superagentic"]
+packages = ["src/fleetwright"]
 
 # The skill ships INSIDE the package, not beside it. `install-skill` writes it
 # into a project at runtime, so it has to be importable from a wheel; and one
 # copy means it cannot drift from the CLI it documents, which is a class of bug
 # this project has already hit more than once.
 [tool.hatch.build.targets.wheel.force-include]
-"src/superagentic/skill/SKILL.md" = "superagentic/skill/SKILL.md"
+"src/fleetwright/skill/SKILL.md" = "fleetwright/skill/SKILL.md"
 
 [tool.hatch.build.targets.sdist]
 # Everything the README links to must be in here, or the doc tests fail inside
@@ -66,7 +66,7 @@ packages = ["src/superagentic"]
 # differently-licensed directory inside an Apache-2.0 wheel is how a licence
 # question becomes a licence problem. The published package is Apache-2.0
 # throughout.
-include = ["src/superagentic", "tests", "examples", "docs", "packaging",
+include = ["src/fleetwright", "tests", "examples", "docs", "packaging",
            "assets", "README.md", "LICENSE", "LICENSING.md",
            "CHANGELOG.md", "CONTRIBUTING.md"]
 # `include` is not enough. Hatchling collects licence files from anywhere in

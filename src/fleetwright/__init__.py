@@ -1,11 +1,11 @@
 """Work leases in one SQLite file, so a fleet of workers divides a job list
 instead of racing it.
 
-Ten workers pointed at the same corpus all start on page one. `superagentic` is
+Ten workers pointed at the same corpus all start on page one. `fleetwright` is
 the table they check first: one of them takes the page, the others are told to
 take a different one, and if the one that took it dies, its work comes back.
 
-    import superagentic as sa
+    import fleetwright as sa
 
     conn = sa.connect("work.db")
     sa.add(conn, "translate", [f"page-{i}" for i in range(1, 500)])
@@ -17,7 +17,7 @@ take a different one, and if the one that took it dies, its work comes back.
 
 A lease, not a lock: a lock held by a crashed worker is worse than no lock at
 all, because nothing can tell a busy worker from a dead one. See
-`superagentic.leases` for the reasoning, and `docs/concepts.md` for what this
+`fleetwright.leases` for the reasoning, and `docs/concepts.md` for what this
 deliberately does not give you — starting with exactly-once, which nothing can.
 """
 
@@ -77,7 +77,7 @@ from .leases import (
 def skill_text() -> str:
     """The Claude Code skill, as text. One copy, shipped inside the package.
 
-    `superagentic install-skill` writes this into a project. Keeping it here
+    `fleetwright install-skill` writes this into a project. Keeping it here
     rather than beside the source means it travels in the wheel and cannot
     drift from the CLI it documents.
     """
@@ -85,7 +85,7 @@ def skill_text() -> str:
     return (Path(__file__).parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 __all__ = ["ANY", "CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",

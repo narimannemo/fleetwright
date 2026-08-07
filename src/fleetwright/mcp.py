@@ -14,9 +14,9 @@ method set; implementing it directly is a hundred lines and means this package
 installs with nothing at all. A server that needs a framework to be reachable
 is a server people do not reach.
 
-    $ superagentic serve --db work.db
+    $ fleetwright serve --db work.db
     # or in an MCP client config:
-    #   "work": {"command": "superagentic", "args": ["serve", "--db", "work.db"]}
+    #   "work": {"command": "fleetwright", "args": ["serve", "--db", "work.db"]}
 """
 
 from __future__ import annotations
@@ -477,7 +477,7 @@ class Server:
         # the frame even to refuse it. Anything that is not an object used to
         # reach `.get` and raise AttributeError, which killed the process --
         # and with it every lease this worker was holding. `echo null |
-        # superagentic serve` was the whole exploit.
+        # fleetwright serve` was the whole exploit.
         if isinstance(msg, list):
             replies = [r for r in (self.handle(m) for m in msg) if r is not None]
             # An empty batch, or one that was all notifications, gets no reply
@@ -502,7 +502,7 @@ class Server:
             return {"jsonrpc": "2.0", "id": mid, "result": {
                 "protocolVersion": want if want in SPOKEN else PROTOCOL,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "superagentic", "version": __version__}}}
+                "serverInfo": {"name": "fleetwright", "version": __version__}}}
         if method in ("notifications/initialized", "initialized"):
             return None
         if method == "tools/list":

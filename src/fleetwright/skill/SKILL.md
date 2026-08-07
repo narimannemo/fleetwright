@@ -1,5 +1,5 @@
 ---
-name: superagentic
+name: fleetwright
 description: Run many subagents over one list of work without them colliding or each inventing its own idea of the task. Use whenever the user asks to process, extract, audit, translate, review, or convert a set of files, pages, records, tickets or rows and it would go faster with several agents at once. Also use when they say "in parallel", "with N agents", "spawn workers", or "fan out".
 ---
 
@@ -16,7 +16,7 @@ Putting the task in the spawn prompt does not fix it. That prompt is invisible
 to the worker you spawn an hour later, and to the one that picks up work a
 crashed worker dropped.
 
-**superagentic is the shared list they claim from, and the brief travels with
+**fleetwright is the shared list they claim from, and the brief travels with
 each unit.** You define the work once; every worker gets it at claim time.
 
 ## When to use this
@@ -32,12 +32,12 @@ the last. A plain loop is clearer and the setup is not free.
 You have no memory of previous sessions. Before deciding anything, run:
 
 ```bash
-superagentic state
+fleetwright state
 ```
 
 It finds the database even if you do not know its name, and tells you which
 runs exist, which are still going, what failed, and the single next command.
-If it says there is no database here, this project has not used superagentic
+If it says there is no database here, this project has not used fleetwright
 and you are starting fresh.
 
 **If a run is still going, do not start a second one over the same work.** Join
@@ -51,17 +51,17 @@ it: spawn workers against the same database and they will claim what is left.
 DB=$PWD/work.db
 
 # What this run is. Everything below belongs to it.
-RUN=$(superagentic start --db "$DB" --label "extract claims from tomus II")
+RUN=$(fleetwright start --db "$DB" --label "extract claims from tomus II")
 
 # What the work IS. The ninth worker, spawned an hour from now, reads this.
-superagentic define extract --db "$DB" \
+fleetwright define extract --db "$DB" \
   --instructions 'Read $path. Record every claim it makes, quoting verbatim.' \
   --done-when    'every claim in the file is recorded, or you have established there are none' \
   --returns      '{"claims": <int>, "notes": "<string>"}'
 
 # The units. Use ABSOLUTE paths: workers may not share your directory.
 ls scans/*.png | xargs -n1 basename > units.txt
-superagentic add extract --db "$DB" --from-file units.txt --run "$RUN" \
+fleetwright add extract --db "$DB" --from-file units.txt --run "$RUN" \
   --meta "{\"path\": \"$PWD/scans/\$name\"}"
 ```
 
@@ -76,7 +76,7 @@ Notes that matter:
 ### 2. Get the worker prompt (do not write it yourself)
 
 ```bash
-superagentic prompt extract --db "$DB"
+fleetwright prompt extract --db "$DB"
 ```
 
 It is generated from the kind, so it already names the skills the work
@@ -98,31 +98,31 @@ usually right.
 ### 4. Wait, and check
 
 ```bash
-superagentic wait --db "$DB" --run "$RUN" --timeout 3600
+fleetwright wait --db "$DB" --run "$RUN" --timeout 3600
 ```
 
 Exit code is the answer: `0` finished cleanly, `1` something failed, `2` timed
-out. While it runs, `superagentic status --db "$DB" --who` shows who holds
+out. While it runs, `fleetwright status --db "$DB" --who` shows who holds
 what.
 
 ### 5. Collect, and verify against the database
 
 ```bash
-superagentic results extract --db "$DB" --run "$RUN" --json
+fleetwright results extract --db "$DB" --run "$RUN" --json
 ```
 
 **Check the database, not the agents' final messages.** A self-report is not
 evidence:
 
 ```bash
-superagentic status --db "$DB" --run "$RUN"
+fleetwright status --db "$DB" --run "$RUN"
 ```
 
 ### 6. If anything failed
 
 ```bash
-superagentic status --db "$DB" --run "$RUN"    # the notes say why
-superagentic retry  --db "$DB" --run "$RUN"    # after fixing the cause
+fleetwright status --db "$DB" --run "$RUN"    # the notes say why
+fleetwright retry  --db "$DB" --run "$RUN"    # after fixing the cause
 ```
 
 `retry` resets attempts, so a unit that failed three times under the old code
@@ -157,9 +157,9 @@ If the work needs a skill or an MCP server, say so on the kind and every worker
 is told before it starts:
 
 ```bash
-superagentic skill xrad-extraction --db "$DB" \
+fleetwright skill xrad-extraction --db "$DB" \
   --source skills/xrad/SKILL.md --version 1.2
-superagentic define extract --db "$DB" --instructions '...' --done-when '...' \
+fleetwright define extract --db "$DB" --instructions '...' --done-when '...' \
   --skill xrad-extraction --mcp 'xrad=xrad serve --db graph.db'
 ```
 
@@ -173,14 +173,14 @@ A unit that is not independent is not a unit. But a unit that *produces* the
 next stage is fine, and the worker enqueues it as it finishes:
 
 ```bash
-superagentic finish "$UNIT" --db "$DB" --worker w0 \
+fleetwright finish "$UNIT" --db "$DB" --worker w0 \
   --result '{"claims": 3}' \
   --then '{"audit": ["p001-c0", "p001-c1", "p001-c2"]}'
 ```
 
 The new units inherit this unit's run and record it as their parent, so `wait
 --run` covers the whole pipeline rather than returning when stage one drains,
-and `superagentic lineage <unit_id>` shows what caused what.
+and `fleetwright lineage <unit_id>` shows what caused what.
 
 Define the second kind **before** anything finishes into it. A `--then` naming
 an undefined kind is refused and the unit stays yours, because a worker handed
@@ -188,13 +188,13 @@ a bare name with no instructions does the wrong work confidently.
 
 ## Over MCP instead of the shell
 
-If `superagentic serve` is wired into the MCP config, the same flow is tools
+If `fleetwright serve` is wired into the MCP config, the same flow is tools
 rather than commands. `start_run`, `register_skill`, `define_kind`, `add_jobs`,
 `worker_prompt`, `job_results` for you; `claim_job`, `finish_job`,
 `release_job`, `fail_job`, `heartbeat_job`, `job_status` for each worker.
 
 ```json
-{"mcpServers": {"work": {"command": "superagentic",
+{"mcpServers": {"work": {"command": "fleetwright",
                          "args": ["serve", "--db", "work.db"]}}}
 ```
 
@@ -202,7 +202,7 @@ rather than commands. `start_run`, `register_skill`, `define_kind`, `add_jobs`,
 
 - **Putting the task in the spawn prompt.** Invisible to any worker spawned
   later and to the one that inherits a crashed worker's unit. This is the
-  entire failure superagentic exists to prevent.
+  entire failure fleetwright exists to prevent.
 - **Spawning workers in separate messages.** They run in sequence and the
   fleet is a fleet of one.
 - **Spawning before enqueueing.** They all find an empty queue, stop correctly,

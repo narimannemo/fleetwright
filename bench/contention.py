@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import superagentic as sa  # noqa: E402
+import fleetwright as sa  # noqa: E402
 
 
 def worker(db: str, out: mp.Queue) -> None:
