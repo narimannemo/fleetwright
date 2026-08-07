@@ -72,10 +72,20 @@ jobs:
           grep -q "Process u0 from /tmp/u0" brief.txt
           grep -q "DONE WHEN" brief.txt
           fleetwright release work:u0 --db ci.db --worker probe
-          for _ in 1 2 3 4; do
-            ( while u=$(fleetwright claim work --json --db ci.db); do
+          # `--result` is not optional decoration here: the kind declares
+          # `returns`, and a finish with no result is now refused and the unit
+          # stays leased. This loop used to omit it, which is exactly the habit
+          # the check exists to break -- an agent that trips the shape gate
+          # once otherwise learns to drop the result rather than fix its shape.
+          # And --worker on BOTH commands, with the same name. A shell worker
+          # claims in one process and finishes in another, so it cannot fall
+          # back to a per-process identity: the finish would not recognise its
+          # own claim. This loop omitted it and every close was refused.
+          for i in 1 2 3 4; do
+            ( while u=$(fleetwright claim work --json --db ci.db --worker "ci-$i"); do
                 id=$(python -c "import json,sys;print(json.loads(sys.argv[1])[0]['unit_id'])" "$u")
-                fleetwright done "$id" --db ci.db >/dev/null
+                fleetwright done "$id" --db ci.db --worker "ci-$i" \
+                  --result '{"ok": true}' >/dev/null
               done ) &
           done
           wait

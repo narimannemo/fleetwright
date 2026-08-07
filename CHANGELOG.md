@@ -71,6 +71,19 @@ fleetwright state              # was: superagentic state
   leaked a connection per candidate file, `stats(buckets=0)` raised, and
   `reclaim()` reported only reopened units and not retirements.
 
+### Changed
+
+- **A close from the command line now has to say who it is**, with `--worker`,
+  `--token`, or `--any-worker`. There is no default, and finding that out cost
+  a broken CI run: the library defaults an omitted worker to `hostname:pid`,
+  which is right for a library (one process claims and finishes) and wrong for
+  a CLI, because a shell worker claims in one command and finishes in another.
+  The two pids differ, so inheriting the library default refused *every* close
+  in the documented shell pattern while reporting "another worker holds it" —
+  40 units claimed, 40 refusals, nothing finished. The README loop,
+  `examples/fleet.sh` and the CI fleet all had this shape and are all fixed; a
+  test now fails if any shipped shell loop closes without proving ownership.
+
 ### Added
 
 - **The lease token as a credential.** Ownership rested on a worker *name*, and

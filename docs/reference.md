@@ -239,12 +239,24 @@ against another's. `FLEETWRIGHT_MODEL` works too.
 ### `finish` / `fail` / `release`
 
 ```bash
-fleetwright finish  extract:p0189          # `done` is an alias
-fleetwright finish  extract:p0189 --cost 0.031 --tokens-in 3100 --tokens-out 900
-fleetwright finish  extract:p0189 --result-file out.json
-fleetwright fail    extract:p0189 --note "no text layer"
-fleetwright release extract:p0189 --note "wrong language"
+fleetwright finish  extract:p0189 --worker w3      # `done` is an alias
+fleetwright finish  extract:p0189 --token "$TOKEN" # from the brief
+fleetwright finish  extract:p0189 --worker w3 --cost 0.031 --tokens-in 3100
+fleetwright finish  extract:p0189 --worker w3 --result-file out.json
+fleetwright fail    extract:p0189 --worker w3 --note "no text layer"
+fleetwright release extract:p0189 --worker w3 --note "wrong language"
 ```
+
+**A close has to say who it is**, with `--worker`, `--token`, or an explicit
+`--any-worker`. There is no default, and that is deliberate: the library
+defaults an omitted worker to `hostname:pid`, which is correct for a library
+(one process claims and finishes) and wrong here, because a shell worker claims
+in one command and finishes in another. Inheriting that default refused every
+close in the documented shell pattern, silently, while reporting "another
+worker holds it".
+
+`--token` is the stronger one. A worker *name* can be shared by two processes
+told to call themselves the same thing; the token is unique per claim.
 
 `--cost`, `--tokens-in` and `--tokens-out` are **declared, never measured**:
 nothing here can observe a model's usage. They are stored because they are the

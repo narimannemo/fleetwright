@@ -257,19 +257,26 @@ Eight workers, no coordinator:
 fleetwright add extract --from-file pages.txt --run "$RUN"
 
 for i in $(seq 1 8); do
-  ( while unit=$(fleetwright claim extract --json --lease 1800); do
+  ( me="worker-$i"
+    while unit=$(fleetwright claim extract --json --lease 1800 --worker "$me"); do
       id=$(echo "$unit" | jq -r '.[0].unit_id')
       name=$(echo "$unit" | jq -r '.[0].name')
       if my-extractor "$name"; then
-        fleetwright done "$id"
+        fleetwright done "$id" --worker "$me"
       else
-        fleetwright fail "$id" --note "extractor exited $?"
+        fleetwright fail "$id" --note "extractor exited $?" --worker "$me"
       fi
     done ) &
 done
 wait
 fleetwright status --who
 ```
+
+`--worker "$me"` on the claim **and** on the close, with the same name. Each of
+those is a separate process, so there is no identity that carries from one
+command to the next, and a close that cannot show whose unit it is is refused
+rather than guessed at. Pass `--token` from the brief instead if you prefer, or
+`--any-worker` when you are cleaning up after a fleet that is gone.
 
 A script driving a fleet does not need to parse any of that. `wait` blocks
 until the work is over and the **exit code is the interface**: `0` finished

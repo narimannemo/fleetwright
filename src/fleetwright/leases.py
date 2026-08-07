@@ -1231,14 +1231,19 @@ def worker_prompt(conn: sqlite3.Connection, kind: str | None = None, *,
                    + "\nIf you cannot, say so and stop. Do not start work you "
                      "are not equipped for.")
     k = f" {kind}" if kind else ""
-    # No `--worker` unless one was asked for. This used to default to
-    # "agent-1", so spawning eight workers by running `prompt` eight times
-    # produced eight processes all called agent-1 -- indistinguishable to every
-    # ownership check, with no mutual exclusion at all. Omitted, `this_worker()`
-    # supplies a per-process identity that cannot collide.
-    w = f" --worker {worker}" if worker else ""
+    # A name is REQUIRED, and it must differ every time this is called.
+    #
+    # It used to be the constant "agent-1", so running `prompt` eight times to
+    # spawn eight workers produced eight called agent-1 -- one name, no mutual
+    # exclusion, every ownership check blind. Omitting it instead is worse: a
+    # shell worker claims in one process and finishes in another, and
+    # `this_worker()` is hostname:pid, so the finish would not recognise its
+    # own claim. A random suffix is the only option that is both unique across
+    # calls and stable across the two commands one worker runs.
+    worker = worker or f"agent-{uuid.uuid4().hex[:6]}"
+    w = f" --worker {worker}"
     return Template(WORKER_PROMPT).safe_substitute(
-        worker=worker or "set automatically, one per process", requires=req,
+        worker=worker, requires=req,
         claim_cmd=f"fleetwright claim{k} --db {db} --brief{w} "
                   f"--model '<which model you are>' --lease {lease:g}",
         done_cmd=f"fleetwright finish <unit_id> --db {db}{w} "

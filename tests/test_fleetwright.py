@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -2865,14 +2866,26 @@ class TestOwnership:
         assert u.token in u.brief(), "a worker cannot hand back what it never saw"
 
     def test_prompt_does_not_hardcode_a_shared_worker_name(self, tmp_path):
-        """Spawning eight workers used to produce eight called agent-1."""
+        """Spawning eight workers used to produce eight called agent-1.
+
+        The fix is a name that DIFFERS per call, not an absent one. Omitting
+        `--worker` looks tidier and breaks the shell pattern outright: a worker
+        claims in one process and finishes in another, and `this_worker()` is
+        hostname:pid, so the finish would not recognise its own claim.
+        """
         conn = sa.connect(str(tmp_path / "t.db"))
         sa.define(conn, "k", "i", done_when="d")
-        assert "--worker" not in sa.worker_prompt(conn, "k")
-        prompts = [sa.worker_prompt(conn, "k", worker=f"crew-{i}")
-                   for i in range(3)]
-        names = {re.search(r"--worker (\S+)", p).group(1) for p in prompts}
-        assert len(names) == 3
+        names = {re.search(r"--worker (\S+)", sa.worker_prompt(conn, "k")).group(1)
+                 for _ in range(8)}
+        assert len(names) == 8, "eight spawns, and not eight distinct names"
+
+    def test_the_prompt_uses_one_name_for_claim_and_finish(self, tmp_path):
+        """Two commands, one worker. If they disagree the finish is refused."""
+        conn = sa.connect(str(tmp_path / "t.db"))
+        sa.define(conn, "k", "i", done_when="d")
+        text = sa.worker_prompt(conn, "k")
+        used = set(re.findall(r"--worker (\S+)", text))
+        assert len(used) == 1, f"the prompt names {used}"
 
 
 class TestReclaimKeepsTheReason:
@@ -3284,3 +3297,77 @@ class TestTimelineLanes:
         tl = sa.timeline(conn)
         assert all(lane["worker"] for lane in tl["lanes"]), "an ownerless lane"
         assert [lane["worker"] for lane in tl["lanes"]] == ["real"]
+
+
+class TestTheShellPattern:
+    """Claim in one process, finish in another. Nothing tested this, and it
+    broke completely: `this_worker()` is hostname:pid, so a finish run as a
+    separate command did not recognise its own claim. Forty units claimed,
+    forty "not yours", nothing finished. Subprocesses, because in-process
+    tests share a pid and cannot see it."""
+
+    def _fleet(self, tmp_path, extra_finish):
+        db = str(tmp_path / "w.db")
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+        def run(*args):
+            return subprocess.run([sys.executable, "-m", "fleetwright", *args],
+                                  capture_output=True, text=True, env=env)
+        run("define", "k", "--db", db, "--instructions", "do $name",
+            "--done-when", "d")
+        run("add", "k", "--db", db, "u1")
+        c = run("claim", "k", "--db", db, "--worker", "shell-1", "--json")
+        assert c.returncode == 0, c.stderr
+        uid = json.loads(c.stdout)[0]["unit_id"]
+        return db, run("finish", uid, "--db", db, *extra_finish), uid
+
+    def test_a_named_worker_can_finish_what_it_claimed(self, tmp_path):
+        db, done, uid = self._fleet(tmp_path, ["--worker", "shell-1"])
+        assert done.returncode == 0, done.stderr
+        assert sa.connect(db).execute(
+            "SELECT status FROM unit").fetchone()[0] == "done"
+
+    def test_a_close_with_no_evidence_of_ownership_is_refused(self, tmp_path):
+        """Refusing beats guessing: the two ways to guess are "close somebody
+        else's unit" and "refuse everything"."""
+        db, done, uid = self._fleet(tmp_path, [])
+        assert done.returncode == 2
+        for flag in ("--worker", "--token", "--any-worker"):
+            assert flag in done.stderr, "the error does not say what to pass"
+        assert sa.connect(db).execute(
+            "SELECT status FROM unit").fetchone()[0] == "leased"
+
+    def test_the_token_alone_is_enough(self, tmp_path):
+        db = str(tmp_path / "w.db")
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+        def run(*args):
+            return subprocess.run([sys.executable, "-m", "fleetwright", *args],
+                                  capture_output=True, text=True, env=env)
+        run("define", "k", "--db", db, "--instructions", "i", "--done-when", "d")
+        run("add", "k", "--db", db, "u1")
+        run("claim", "k", "--db", db, "--worker", "shell-1")
+        token = sa.connect(db).execute(
+            "SELECT lease_token, unit_id FROM unit").fetchone()
+        done = run("finish", token["unit_id"], "--db", db,
+                   "--token", token["lease_token"])
+        assert done.returncode == 0, done.stderr
+
+    def test_every_shipped_shell_loop_names_its_worker(self):
+        """The README loop, examples/fleet.sh and the CI fleet all closed
+        without saying who they were, and all three would now be refused on
+        every unit. A doc that does not run is worse than no doc."""
+        sources = {
+            "README.md": (ROOT / "README.md"),
+            "examples/fleet.sh": (ROOT / "examples" / "fleet.sh"),
+            "ci.yml": (ROOT / ".github" / "workflows" / "ci.yml"),
+        }
+        bad = []
+        for label, path in sources.items():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                t = line.strip()
+                if not re.match(r"fleetwright (done|finish|fail|release)\b", t):
+                    continue
+                if not any(f in t for f in ("--worker", "--token",
+                                            "--any-worker")):
+                    bad.append(f"{label}: {t}")
+        assert not bad, "a close with nothing to prove ownership:\n  " + \
+            "\n  ".join(bad)

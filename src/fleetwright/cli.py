@@ -365,11 +365,41 @@ def _read_result(a: argparse.Namespace):
 
 
 def _who(a: argparse.Namespace) -> str | None:
-    """The worker identity a closing command should use.
+    """The worker identity a closing command should use, or exit explaining.
 
-    `None` now means "this process", so an unowned close has to be asked for.
+    The library defaults an omitted worker to `this_worker()`, which is right
+    for a library: one process claims and finishes, so the identity matches.
+    It is WRONG here. `this_worker()` is `hostname:pid`, and a shell fleet
+    claims in one process and finishes in another --
+
+        u=$(fleetwright claim work --json)      # pid 4021
+        fleetwright finish "$id"                # pid 4022, a different name
+
+    -- so inheriting the library default silently refused every close in the
+    documented shell pattern. Forty units claimed, forty "not yours", nothing
+    finished. Found by running the CI fleet, not by any test.
+
+    So a close from the command line needs evidence: a name, the lease token,
+    or an explicit "I know it is not mine". Refusing beats guessing, because
+    the two ways of guessing are "close somebody else's unit" and "refuse
+    everything", and this way the error says which flag to add.
     """
-    return leases.ANY if getattr(a, "any_worker", False) else a.worker
+    if getattr(a, "any_worker", False):
+        return leases.ANY
+    if a.worker:
+        return a.worker
+    if getattr(a, "token", None):
+        # The token is per-claim and unique, so it proves ownership on its own
+        # and the name adds nothing.
+        return leases.ANY
+    print("who are you? this command cannot tell, and closing a unit needs to "
+          "know.", file=sys.stderr)
+    print("  --worker NAME   the name you claimed with (a shell worker must "
+          "pass the same one to claim and to finish)", file=sys.stderr)
+    print("  --token T       the token from your brief, which is unique to "
+          "your claim", file=sys.stderr)
+    print("  --any-worker    close it whoever holds it", file=sys.stderr)
+    raise SystemExit(2)
 
 
 def _cmd_done(a: argparse.Namespace) -> int:
