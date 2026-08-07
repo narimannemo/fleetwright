@@ -123,7 +123,8 @@ def _cmd_define(a: argparse.Namespace) -> int:
         digest = leases.define(
             _conn(a), a.kind, instructions, done_when=a.done_when,
             returns=a.returns, tools=a.tools, skills=a.skill or None,
-            mcp=mcp or None, context=context, force=a.force)
+            mcp=mcp or None, context=context,
+            max_attempts=a.max_attempts, force=a.force)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -174,9 +175,13 @@ def _cmd_prompt(a: argparse.Namespace) -> int:
     for i in range(1, a.n + 1):
         if a.n > 1:
             print(f"{'=' * 30} worker {i} of {a.n} {'=' * 30}")
-        print(leases.worker_prompt(conn, a.kind, db=a.db,
-                                   worker=f"{a.worker}-{i}" if a.n > 1 else a.worker,
-                                   lease=a.lease))
+        print(leases.worker_prompt(
+            conn, a.kind, db=a.db, lease=a.lease,
+            # Only suffix a name the caller actually chose. Defaulting to
+            # "agent" and printing `--worker agent-1` for a single worker is
+            # how eight spawned workers all ended up called agent-1.
+            worker=(f"{a.worker}-{i}" if a.n > 1 else a.worker)
+            if a.worker else None))
         if a.n > 1:
             print()
     return 0
@@ -359,14 +364,35 @@ def _read_result(a: argparse.Namespace):
         raise SystemExit(2) from None
 
 
+def _who(a: argparse.Namespace) -> str | None:
+    """The worker identity a closing command should use.
+
+    `None` now means "this process", so an unowned close has to be asked for.
+    """
+    return leases.ANY if getattr(a, "any_worker", False) else a.worker
+
+
 def _cmd_done(a: argparse.Namespace) -> int:
     conn = _conn(a)
     result = _read_result(a)
-    if result is not None and not a.no_check:
+    if not a.no_check:
         row = conn.execute("SELECT kind FROM unit WHERE unit_id = ?",
                            (a.unit_id,)).fetchone()
         spec = leases.spec(conn, row["kind"]) if row else None
-        problems = shape.describe(spec.get("returns") if spec else None, result)
+        declared = (spec or {}).get("returns")
+        if result is None and shape.parse(declared) is not None:
+            # A missing result is a shape violation, not an exemption. The
+            # check used to be skipped entirely when there was no result, so a
+            # kind declaring {"claims": <int>} accepted a finish with nothing
+            # at all -- and an agent that trips the gate once learns to drop
+            # --result rather than to fix the shape.
+            print(f"{row['kind']!r} declares a result and none was given:",
+                  file=sys.stderr)
+            print(f"  returns: {declared}", file=sys.stderr)
+            print("  the unit is still yours. Finish again with --result, "
+                  "or pass --no-check.", file=sys.stderr)
+            raise SystemExit(2)
+        problems = shape.describe(declared, result) if result is not None else []
         if problems:
             # Refused, not warned. The unit stays leased, so the worker can fix
             # the shape and finish again without losing the work — the same
@@ -404,7 +430,7 @@ def _cmd_done(a: argparse.Namespace) -> int:
             print("  `superagentic define` them first; a unit with no "
                   "instructions gives its worker a bare name.", file=sys.stderr)
             raise SystemExit(2)
-    if leases.finish(conn, a.unit_id, worker=a.worker, note=a.note,
+    if leases.finish(conn, a.unit_id, worker=_who(a), token=a.token, note=a.note,
                      result=result, tokens_in=a.tokens_in,
                      tokens_out=a.tokens_out, cost=a.cost, then=then):
         print(f"done {a.unit_id}")
@@ -417,7 +443,8 @@ def _cmd_done(a: argparse.Namespace) -> int:
 
 
 def _cmd_fail(a: argparse.Namespace) -> int:
-    if leases.fail(_conn(a), a.unit_id, note=a.note, worker=a.worker,
+    if leases.fail(_conn(a), a.unit_id, note=a.note, worker=_who(a),
+                   token=a.token,
                    max_attempts=a.max_attempts):
         print(f"failed {a.unit_id} — {a.note}")
         return 0
@@ -426,7 +453,8 @@ def _cmd_fail(a: argparse.Namespace) -> int:
 
 
 def _cmd_release(a: argparse.Namespace) -> int:
-    if leases.release(_conn(a), a.unit_id, worker=a.worker, note=a.note):
+    if leases.release(_conn(a), a.unit_id, worker=_who(a), token=a.token,
+                      note=a.note):
         print(f"released {a.unit_id}")
         return 0
     print(f"not yours — {a.unit_id}", file=sys.stderr)
@@ -447,9 +475,13 @@ def _find_db(explicit: str) -> Path | None:
     if explicit != "work.db":
         return None
     import sqlite3 as _s
+    from contextlib import closing
     for cand in sorted(Path().glob("*.db")):
         try:
-            with _s.connect(f"file:{cand}?mode=ro", uri=True) as c:
+            # `with connect(...)` commits or rolls back; it does NOT close. In
+            # a directory of a hundred .db files that leaked ninety-nine file
+            # handles before finding the right one.
+            with closing(_s.connect(f"file:{cand}?mode=ro", uri=True)) as c:
                 names = {r[0] for r in c.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
             if {"unit", "kind"} <= names:
@@ -699,6 +731,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="an MCP server a worker MUST have; repeatable")
     s.add_argument("--context", metavar="FILE",
                    help="read-only material every worker of this kind receives")
+    s.add_argument("--max-attempts", type=int, metavar="N",
+                   help="how many hand-outs before a unit of this kind stays "
+                        "failed instead of returning to the queue. Belongs to "
+                        "the WORK, not to a claim: an expensive kind may "
+                        "deserve one attempt and a flaky one five.")
     s.add_argument("--force", action="store_true",
                    help="redefine even with units waiting or in flight")
     s.set_defaults(fn=_cmd_define)
@@ -707,7 +744,11 @@ def build_parser() -> argparse.ArgumentParser:
         "prompt", help="the spawn prompt for a worker, generated from the kind"))
     s.add_argument("kind", nargs="?")
     s.add_argument("-n", type=int, default=1, help="print one per worker")
-    s.add_argument("--worker", default="agent")
+    s.add_argument("--worker", default=None,
+                   help="name the workers yourself. Omit and each process "
+                        "picks its own, which is what you want: a shared name "
+                        "makes two processes indistinguishable to every "
+                        "ownership check.")
     s.add_argument("--lease", type=float, default=leases.DEFAULT_LEASE)
     s.set_defaults(fn=_cmd_prompt)
 
@@ -792,7 +833,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="read the result from a file; use this for anything "
                             "large, since Linux caps one argument at 128 KB")
         s.add_argument("--note")
-        s.add_argument("--worker")
+        s.add_argument("--worker",
+                       help="omit and this process's own identity is used, "
+                            "the same one `claim` records")
+        s.add_argument("--any-worker", action="store_true",
+                       help="close it whoever holds it. An operator cleaning "
+                            "up after a fleet that is gone, not a worker.")
+        s.add_argument("--token", metavar="T",
+                       help="the token from your brief. A worker NAME can be "
+                            "shared by two processes; this cannot.")
         s.add_argument("--no-check", action="store_true",
                        help="skip the check against the kind's declared returns")
         # The only way one unit causes another to exist, and until now it was
@@ -815,6 +864,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("unit_id")
     s.add_argument("--note", required=True, help="why; it is kept")
     s.add_argument("--worker")
+    s.add_argument("--any-worker", action="store_true",
+                   help="fail it whoever holds it")
+    s.add_argument("--token", metavar="T", help="the token from your brief")
     s.add_argument("--max-attempts", type=int, default=leases.MAX_ATTEMPTS,
                    help="how many hand-outs before this stays failed rather "
                         "than returning to the queue")
@@ -822,6 +874,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = common(sub.add_parser("release", help="hand a unit back, no attempt burned"))
     s.add_argument("unit_id")
+    s.add_argument("--any-worker", action="store_true",
+                   help="release it whoever holds it")
+    s.add_argument("--token", metavar="T", help="the token from your brief")
     s.add_argument("--note")
     s.add_argument("--worker")
     s.set_defaults(fn=_cmd_release)

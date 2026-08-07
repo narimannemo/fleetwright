@@ -23,6 +23,7 @@ deliberately does not give you — starting with exactly-once, which nothing can
 
 from . import config, shape
 from .leases import (
+    ANY,
     CANCELLED,
     DEFAULT_LEASE,
     DONE,
@@ -38,6 +39,7 @@ from .leases import (
     cancel,
     claim,
     connect,
+    connect_readonly,
     define,
     fail,
     failures,
@@ -85,9 +87,10 @@ def skill_text() -> str:
 
 __version__ = "0.20.0"
 
-__all__ = ["CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
+__all__ = ["ANY", "CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
-           "Unit", "add", "brief_for", "cancel", "claim", "connect", "define", "fail", "failures",
+           "Unit", "add", "brief_for", "cancel", "claim", "connect", "connect_readonly",
+           "define", "fail", "failures",
            "finish", "flow", "graph", "heartbeat", "iter_results", "kind_digest",
            "kind_versions", "leased", "lineage", "progress", "reclaim", "release",
            "outstanding", "register_skill", "resolve_skills", "results", "retry",

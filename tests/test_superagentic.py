@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -730,6 +731,39 @@ class TestPackaging:
         assert "\n  resource " not in self._formula(monkeypatch, capsys)
 
 
+class _FakeHandler:
+    """Drive the dashboard's real request handler without a socket.
+
+    Going through `do_GET` rather than `_payload` is the point: a future route
+    that reclaims is caught, and `_payload` is not the only thing a browser
+    touches.
+    """
+
+    def __init__(self, dashboard, db):
+        from pathlib import Path as _P
+        self.dashboard, self.db = dashboard, _P(db)
+
+    def get(self, path):
+        import io
+        d = self.dashboard
+        H = d.Handler if hasattr(d, "Handler") else d._Handler
+        h = H.__new__(H)
+        h.projects = {self.db.stem: self.db}
+        h.token = None
+        h.sessions = set()
+        h.path = path
+        h.headers = {}
+        h.wfile = io.BytesIO()
+        h.rfile = io.BytesIO()
+        h.send_response = lambda *a, **k: None
+        h.send_header = lambda *a, **k: None
+        h.end_headers = lambda: None
+        h.send_error = lambda *a, **k: None
+        h.log_message = lambda *a, **k: None
+        h.do_GET()
+        return h.wfile.getvalue()
+
+
 class TestDashboard:
     def _stats(self, conn):
         from superagentic import leases
@@ -788,29 +822,77 @@ class TestDashboard:
 
     def test_both_themes_are_defined_not_inverted(self, tmp_path):
         from superagentic import dashboard
-        html = dashboard.snapshot(tmp_path / "w.db")
+        db = tmp_path / "w.db"
+        sa.add(sa.connect(db), "x", ["u1"])
+        html = dashboard.snapshot(db)
         for hook in ("prefers-color-scheme: dark", ':root[data-theme="dark"]',
                      ':root[data-theme="light"]'):
             assert hook in html, f"{hook} missing; the theme toggle will not win"
 
     def test_the_dashboard_never_writes(self, tmp_path):
-        """Pointing it at a live run must not disturb the run."""
+        """Pointing it at a live run must not disturb the run.
+
+        The previous version of this test passed while the dashboard was
+        reclaiming leases on every GET, and it is worth saying how, because
+        all three mistakes are easy to repeat:
+
+        1. It grepped dashboard.py for write verbs. The write was `reclaim()`
+           inside `leases.stats()`, and a source scan cannot see through a
+           function call.
+        2. It added a unit and asserted it was still `open` afterwards --
+           without ever CLAIMING it. `reclaim` only touches expired *leased*
+           rows, so it asserted the one state the bug could not affect.
+        3. `assert len(db.read_bytes()) >= len(before)` passes when the file
+           GROWS. It asserted the opposite of what it meant.
+
+        So this one sets up the state the bug needs, drives the real routes,
+        and compares the table contents rather than the file length.
+        """
         from superagentic import dashboard
-        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(encoding="utf-8")
-        # Scan the PYTHON only. The embedded page is a string literal full of
-        # JavaScript, and a bare word search over it produces false alarms —
-        # `LAST_UPDATE` is not a SQL statement.
-        python_only = src.replace(dashboard.PAGE, "")
-        for verb in ("sa.claim(", "leases.claim(", "leases.finish(", "leases.add(",
-                     "DELETE FROM", "INSERT INTO", "UPDATE unit", "UPDATE run",
-                     "conn.commit("):
-            assert verb not in python_only, f"dashboard.py contains {verb!r}"
+        db = tmp_path / "w.db"
+        conn = sa.connect(db)
+        run = sa.start_run(conn, label="live")
+        sa.define(conn, "k", "i", done_when="d")
+        sa.add(conn, "k", ["u1", "u2"], run=run)
+        # A worker that is SLOW, not dead: its lease has expired but it is
+        # still working. This is precisely what a viewer must not disturb.
+        sa.claim(conn, "k", worker="slow-but-alive", lease=1)
+        conn.execute("UPDATE unit SET leased_until = ?", (time.time() - 1,))
+        conn.commit()
+
+        def snapshot_tables():
+            c = sa.connect(db)
+            return {t: c.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
+                    for t in ("unit", "kind", "run", "skill")}
+
+        def rows_equal(a, b):
+            return all([tuple(r) for r in a[t]] == [tuple(r) for r in b[t]]
+                       for t in a)
+
+        before = snapshot_tables()
+        handler = _FakeHandler(dashboard, db)
+        for path in ("/", "/api", "/api/units", "/api/units?limit=1&offset=0",
+                     "/favicon.ico"):
+            handler.get(path)
+        assert rows_equal(before, snapshot_tables()), (
+            "a GET changed the queue")
+        assert sa.units(sa.connect(db))["units"][0]["status"] == "leased"
+
+    def test_the_dashboard_opens_the_file_read_only(self, tmp_path):
+        """Enforced by SQLite, not by everyone remembering."""
         db = tmp_path / "w.db"
         sa.add(sa.connect(db), "x", ["u1"])
-        before = db.read_bytes()
-        dashboard.snapshot(db)
-        assert sa.progress(sa.connect(db))["x"][sa.OPEN] == 1
-        assert len(db.read_bytes()) >= len(before)
+        conn = sa.connect_readonly(db)
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("UPDATE unit SET note = 'x'")
+            conn.commit()
+
+    def test_a_missing_database_is_an_error_not_an_empty_one(self, tmp_path):
+        """A typo in --db used to create a database and then report a
+        perfectly healthy zero units."""
+        with pytest.raises(FileNotFoundError):
+            sa.connect_readonly(tmp_path / "typo.db")
+        assert not (tmp_path / "typo.db").exists()
 
 
 class TestDashboardAuth:
@@ -913,7 +995,9 @@ class TestDashboardBrowser:
         # Without this the browser asks for /favicon.ico and logs a 404 that
         # looks like a bug in the tool.
         from superagentic import dashboard
-        html = dashboard.snapshot(tmp_path / "p.db")
+        db = tmp_path / "p.db"
+        sa.add(sa.connect(db), "x", ["u1"])
+        html = dashboard.snapshot(db)
         assert 'rel="icon"' in html and "data:image/svg+xml," in html
 
     def test_favicon_ico_is_answered_rather_than_404(self):
@@ -1084,7 +1168,9 @@ class TestPaginationAndModel:
 class TestRailAndVersion:
     def test_the_version_is_in_the_payload(self, tmp_path):
         from superagentic import __version__, dashboard
-        html = dashboard.snapshot(tmp_path / "p.db")
+        db = tmp_path / "p.db"
+        sa.add(sa.connect(db), "x", ["u1"])
+        html = dashboard.snapshot(db)
         assert f'"version": "{__version__}"' in html
 
     def test_the_rail_collapses_without_disappearing(self):
@@ -2676,3 +2762,486 @@ class TestGraph:
             {"kind": "a", "units": 1, "done": 0, "failed": 0, "leased": 0,
              "open": 1, "cancelled": 0, "cost": 0.0, "mean_seconds": None,
              "depth": 0}]
+
+
+def _expire(conn, unit_id=None):
+    """Push a lease into the past. Never sleep: a 10ms lease is a flaky test."""
+    if unit_id:
+        conn.execute("UPDATE unit SET leased_until = ? WHERE unit_id = ?",
+                     (time.time() - 1, unit_id))
+    else:
+        conn.execute("UPDATE unit SET leased_until = ?", (time.time() - 1,))
+    conn.commit()
+
+
+class TestOwnership:
+    """A lost lease must actually lose the unit.
+
+    The ownership predicate was only appended when a worker name was passed,
+    and all three closers defaulted it to None -- so the check that the README
+    and docs/concepts.md both describe was opt-in. `claim` has always defaulted
+    its worker; the closers did not, and that asymmetry was the whole bug.
+    """
+
+    def _contested(self, tmp_path, name="w.db"):
+        conn = sa.connect(str(tmp_path / name))
+        run = sa.start_run(conn, label="t")
+        sa.define(conn, "k", "do $name", done_when="d")
+        sa.add(conn, "k", ["u1"], run=run)
+        stale = sa.claim(conn, "k", worker="A", lease=1)[0]
+        _expire(conn)
+        live = sa.claim(conn, "k", worker="B", lease=600)[0]
+        return conn, stale, live
+
+    def test_close_without_worker_cannot_steal_a_reclaimed_unit(self, tmp_path):
+        conn, stale, live = self._contested(tmp_path)
+        assert sa.finish(conn, stale.unit_id, result={"v": "stale"}) is False
+        row = conn.execute("SELECT worker, status, result FROM unit").fetchone()
+        assert row["worker"] == "B" and row["status"] == "leased"
+        assert row["result"] is None, "a stale result overwrote a live holder's"
+
+    def test_release_without_worker_cannot_reopen_a_held_unit(self, tmp_path):
+        conn, stale, live = self._contested(tmp_path)
+        assert sa.release(conn, stale.unit_id) is False
+        assert conn.execute("SELECT status FROM unit").fetchone()[0] == "leased"
+
+    def test_fail_without_worker_cannot_bury_a_held_unit(self, tmp_path):
+        conn, stale, live = self._contested(tmp_path)
+        assert sa.fail(conn, stale.unit_id, note="not mine") is False
+        assert conn.execute("SELECT status FROM unit").fetchone()[0] == "leased"
+
+    def test_any_is_still_an_escape_hatch(self, tmp_path):
+        """An operator cleaning up after a fleet that is gone still needs it."""
+        conn, stale, live = self._contested(tmp_path)
+        assert sa.finish(conn, stale.unit_id, worker=sa.ANY) is True
+
+    def test_the_live_holder_is_never_refused(self, tmp_path):
+        conn, stale, live = self._contested(tmp_path)
+        assert sa.finish(conn, live.unit_id, worker="B") is True
+
+    def test_attribution_survives(self, tmp_path):
+        """per_worker credited B for A's output, which is worse than losing it."""
+        conn, stale, live = self._contested(tmp_path)
+        sa.finish(conn, stale.unit_id, result={"v": "stale"})
+        sa.finish(conn, live.unit_id, worker="B", result={"v": "live"})
+        row = conn.execute("SELECT worker, result FROM unit").fetchone()
+        assert row["worker"] == "B" and "live" in row["result"]
+
+    def test_a_same_named_stale_worker_is_refused_with_a_token(self, tmp_path):
+        """Two processes told to call themselves agent-1 are one name and two
+        claims. The name cannot tell them apart; the token can."""
+        conn = sa.connect(str(tmp_path / "t.db"))
+        sa.define(conn, "k", "i", done_when="d")
+        sa.add(conn, "k", ["u1"])
+        stale = sa.claim(conn, "k", worker="agent-1", lease=1)[0]
+        _expire(conn)
+        live = sa.claim(conn, "k", worker="agent-1", lease=600)[0]
+        assert stale.token and live.token and stale.token != live.token
+        assert sa.finish(conn, stale.unit_id, worker="agent-1",
+                         token=stale.token) is False
+        assert sa.heartbeat(conn, [live.unit_id], worker="agent-1",
+                            token=stale.token) == 0
+        assert sa.finish(conn, live.unit_id, worker="agent-1",
+                         token=live.token) is True
+
+    def test_the_token_reaches_the_worker(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "t.db"))
+        sa.define(conn, "k", "i", done_when="d")
+        sa.add(conn, "k", ["u1"])
+        u = sa.claim(conn, "k", worker="w")[0]
+        assert u.token
+        assert u.token in u.brief(), "a worker cannot hand back what it never saw"
+
+    def test_prompt_does_not_hardcode_a_shared_worker_name(self, tmp_path):
+        """Spawning eight workers used to produce eight called agent-1."""
+        conn = sa.connect(str(tmp_path / "t.db"))
+        sa.define(conn, "k", "i", done_when="d")
+        assert "--worker" not in sa.worker_prompt(conn, "k")
+        prompts = [sa.worker_prompt(conn, "k", worker=f"crew-{i}")
+                   for i in range(3)]
+        names = {re.search(r"--worker (\S+)", p).group(1) for p in prompts}
+        assert len(names) == 3
+
+
+class TestReclaimKeepsTheReason:
+
+    def test_reclaim_preserves_an_earlier_failure_note(self, tmp_path):
+        """`failures()` and the "Could not finish" panel exist to show it."""
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.define(conn, "k", "i", done_when="d")
+        sa.add(conn, "k", ["u1"])
+        for i in range(2):
+            u = sa.claim(conn, "k", worker=f"w{i}")[0]
+            sa.fail(conn, u.unit_id, note="OOM parsing page 12", worker=f"w{i}")
+            if i == 0:
+                sa.retry(conn, names=["u1"])
+        sa.claim(conn, "k", worker="w9")
+        _expire(conn)
+        sa.reclaim(conn)
+        row = conn.execute("SELECT status, note FROM unit").fetchone()
+        assert row["status"] == "failed"
+        assert row["note"] == "OOM parsing page 12", (
+            "a tautology overwrote the only record of why")
+
+    def test_reclaim_counts_retirements_too(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.define(conn, "k", "i", done_when="d", max_attempts=1)
+        sa.add(conn, "k", ["u1", "u2"])
+        sa.claim(conn, "k", worker="w", n=2)
+        _expire(conn)
+        assert sa.reclaim(conn) == 2, "reported only the reopened ones"
+
+
+class TestRetirementIsPerKind:
+
+    def test_claim_max_attempts_does_not_retire_other_kinds(self, tmp_path):
+        """One worker's per-call flag mass-failed an unrelated kind's units."""
+        conn = sa.connect(str(tmp_path / "w.db"))
+        for k in ("a", "b"):
+            sa.define(conn, k, "i", done_when="d")
+        sa.add(conn, "a", ["a1", "a2", "a3"])
+        sa.add(conn, "b", ["b1"])
+        sa.claim(conn, "a", worker="wa", n=3)
+        _expire(conn)
+        sa.claim(conn, "b", worker="wb", max_attempts=1)
+        failed = conn.execute(
+            "SELECT count(*) FROM unit WHERE status='failed'").fetchone()[0]
+        assert failed == 0, "another kind's units were retired"
+
+    def test_a_kind_can_set_its_own_retirement(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.define(conn, "cheap", "i", done_when="d", max_attempts=1)
+        sa.define(conn, "patient", "i", done_when="d", max_attempts=9)
+        sa.add(conn, "cheap", ["c1"])
+        sa.add(conn, "patient", ["p1"])
+        sa.claim(conn, worker="w", n=2)
+        _expire(conn)
+        sa.reclaim(conn)
+        got = dict(conn.execute("SELECT kind, status FROM unit").fetchall())
+        assert got["cheap"] == "failed"
+        assert got["patient"] == "open", "retired before its own kind would"
+
+
+class TestReleaseIsNotAnAttempt:
+
+    def test_release_does_not_consume_an_attempt(self, tmp_path):
+        """Documented as "without calling it a failure", and it counted as one:
+        six honest hand-backs left the unit at the limit, so the next worker
+        merely to crash sent it straight to failed."""
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.define(conn, "k", "i", done_when="d")
+        sa.add(conn, "k", ["u1"])
+        for _ in range(6):
+            got = sa.claim(conn, "k", worker="w")
+            assert got, "the queue retired a unit that was only handed back"
+            sa.release(conn, got[0].unit_id, worker="w")
+        row = conn.execute("SELECT status, attempts FROM unit").fetchone()
+        assert row["status"] == "open" and row["attempts"] == 0
+
+    def test_a_crash_still_burns_one(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.define(conn, "k", "i", done_when="d")
+        sa.add(conn, "k", ["u1"])
+        sa.claim(conn, "k", worker="w")
+        _expire(conn)
+        sa.reclaim(conn)
+        assert conn.execute("SELECT attempts FROM unit").fetchone()[0] == 1
+
+
+class TestPinning:
+
+    def test_a_claimed_unit_always_has_a_kind_digest(self, tmp_path):
+        """The pin used to be a second statement after the claim committed, so
+        a crash in between left a leased row with no digest -- and `brief_for`
+        then fell back to the CURRENT definition, the exact wrong answer."""
+        conn = sa.connect(str(tmp_path / "w.db"))
+        for k in ("a", "b"):
+            sa.define(conn, k, f"instructions for {k}", done_when="d")
+        sa.add(conn, "a", ["a1", "a2"])
+        sa.add(conn, "b", ["b1"])
+        got = sa.claim(conn, worker="w", n=3)
+        assert len(got) == 3
+        for r in conn.execute("SELECT kind, kind_digest FROM unit"):
+            assert r["kind_digest"], f"{r['kind']} was claimed unpinned"
+
+    def test_the_pin_matches_the_kind_it_was_claimed_under(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.define(conn, "k", "V1", done_when="d")
+        sa.add(conn, "k", ["u1"])
+        u = sa.claim(conn, "k", worker="w")[0]
+        sa.define(conn, "k", "V2", done_when="d", force=True)
+        assert "V1" in sa.brief_for(conn, u.unit_id)
+
+    def test_the_fallback_pin_is_guarded_by_the_lease_token(self, tmp_path,
+                                                            monkeypatch):
+        """The pin now happens inside the claiming UPDATE, so the old
+        clobber is structurally impossible on the main path. One narrow path
+        remains -- a kind enqueued between the pre-read and the claim lands
+        unpinned and is filled in afterwards -- and that write must carry the
+        token, or a stale claimer's late pin overwrites the live holder's.
+
+        Unreachable single-threaded, so the race is simulated: `_pins` returns
+        nothing the first time, which is exactly what a kind missing from the
+        pre-read looks like.
+        """
+        import superagentic.leases as L
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.define(conn, "k", "V1", done_when="d")
+        sa.add(conn, "k", ["u1"])
+
+        real, calls = L._pins, []
+        def once(c, specs):
+            calls.append(1)
+            return ({}, {}) if len(calls) == 1 else real(c, specs)
+        monkeypatch.setattr(L, "_pins", once)
+
+        u = sa.claim(conn, "k", worker="A")[0]
+        assert len(calls) == 2, "the fallback never ran, so it is untested"
+        digest = conn.execute("SELECT kind_digest FROM unit").fetchone()[0]
+        assert digest, "the fallback left the unit unpinned"
+        assert "V1" in sa.brief_for(conn, u.unit_id)
+
+    def test_the_fallback_write_names_the_lease_token(self):
+        """Deliberately a source assertion, and deliberately labelled as one.
+
+        The fallback's token predicate only matters when two processes race,
+        which a single-threaded test cannot stage: any assertion I write about
+        it here passes whether the predicate is there or not, and an assertion
+        that cannot fail is worse than none. So this checks the predicate is
+        written, and says plainly that is all it checks.
+        """
+        src = (ROOT / "src" / "superagentic" / "leases.py").read_text(
+            encoding="utf-8")
+        fallback = src.split("# A kind enqueued between the pre-read")[1][:900]
+        assert "AND lease_token = ?" in fallback
+
+
+class TestThenIsValidatedFirst:
+    """Everything after `_close` is past the point of no return."""
+
+    def _leased(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "w.db"))
+        for k in ("k", "audit"):
+            sa.define(conn, k, "i", done_when="d")
+        sa.add(conn, "k", ["u1"])
+        return conn, sa.claim(conn, "k", worker="w")[0]
+
+    @pytest.mark.parametrize("bad", [
+        {"audit": [{"a": 1}]},          # raised ProgrammingError inside add()
+        {"audit": "abc"},               # enqueued one unit PER CHARACTER
+        {"audit": [""]},
+        {"": ["a"]},
+        {"audit": 7},
+        "not a dict",
+    ])
+    def test_finish_validates_then_before_closing(self, tmp_path, bad):
+        conn, u = self._leased(tmp_path)
+        with pytest.raises(ValueError):
+            sa.finish(conn, u.unit_id, worker="w", result={"r": 1}, then=bad)
+        row = conn.execute("SELECT status, result FROM unit "
+                           "WHERE unit_id = ?", (u.unit_id,)).fetchone()
+        assert row["status"] == "leased", "closed anyway; the caller cannot retry"
+        assert row["result"] is None
+        assert conn.execute("SELECT count(*) FROM unit WHERE kind='audit'"
+                            ).fetchone()[0] == 0
+
+    def test_a_corrected_retry_succeeds(self, tmp_path):
+        conn, u = self._leased(tmp_path)
+        with pytest.raises(ValueError):
+            sa.finish(conn, u.unit_id, worker="w", then={"audit": "abc"})
+        assert sa.finish(conn, u.unit_id, worker="w",
+                         then={"audit": ["u1-a"]}) is True
+        assert conn.execute("SELECT count(*) FROM unit WHERE kind='audit'"
+                            ).fetchone()[0] == 1
+
+    def test_a_bare_string_is_not_iterated(self, tmp_path):
+        conn, u = self._leased(tmp_path)
+        with pytest.raises(ValueError, match="per character"):
+            sa.finish(conn, u.unit_id, worker="w", then={"audit": "abc"})
+
+
+class TestMissingResultIsAShapeViolation:
+
+    def _ready(self, tmp_path, returns):
+        db = str(tmp_path / "w.db")
+        argv = ["define", "k", "--db", db, "--instructions", "i",
+                "--done-when", "d"]
+        if returns:
+            argv += ["--returns", returns]
+        cli_main(argv)
+        cli_main(["add", "k", "--db", db, "u1"])
+        cli_main(["claim", "k", "--db", db, "--worker", "w"])
+        conn = sa.connect(db)
+        return db, conn, conn.execute("SELECT unit_id FROM unit").fetchone()[0]
+
+    def test_finish_without_result_is_refused_when_returns_declared(self, tmp_path):
+        """An agent that trips the shape gate once learns to drop --result."""
+        db, conn, uid = self._ready(tmp_path, '{"claims": <int>}')
+        with pytest.raises(SystemExit) as e:
+            cli_main(["finish", uid, "--db", db, "--worker", "w"])
+        assert e.value.code == 2
+        assert conn.execute("SELECT status FROM unit").fetchone()[0] == "leased"
+
+    def test_no_check_still_bypasses(self, tmp_path):
+        db, conn, uid = self._ready(tmp_path, '{"claims": <int>}')
+        assert cli_main(["finish", uid, "--db", db, "--worker", "w",
+                         "--no-check"]) == 0
+
+    def test_a_kind_with_no_returns_is_unaffected(self, tmp_path):
+        db, conn, uid = self._ready(tmp_path, None)
+        assert cli_main(["finish", uid, "--db", db, "--worker", "w"]) == 0
+
+    def test_prose_returns_is_not_a_shape(self, tmp_path):
+        """"a sentence saying what you found" is a legitimate thing to write."""
+        db, conn, uid = self._ready(tmp_path, "a sentence saying what you found")
+        assert cli_main(["finish", uid, "--db", db, "--worker", "w"]) == 0
+
+
+class TestUnreadableSkill:
+    """`state` is the tool whose description says CALL THIS FIRST."""
+
+    def test_state_survives_a_binary_skill_source(self, tmp_path):
+        src = tmp_path / "s.md"
+        src.write_text("# skill")
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.register_skill(conn, "s", source=str(src))
+        src.write_bytes(b"\xff\xfe\x00not utf-8")
+        st = sa.state(conn)
+        assert any("unreadable" in a["what"] for a in st["attention"])
+
+    def test_registering_a_binary_source_does_not_raise(self, tmp_path):
+        src = tmp_path / "s.md"
+        src.write_bytes(b"\xff\xfe binary")
+        conn = sa.connect(str(tmp_path / "w.db"))
+        r = sa.register_skill(conn, "s", source=str(src))
+        assert r["digest"] is None
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="chmod 000 does not deny the owner on Windows")
+    def test_state_survives_an_unreadable_skill_source(self, tmp_path):
+        src = tmp_path / "s.md"
+        src.write_text("# skill")
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.register_skill(conn, "s", source=str(src))
+        src.chmod(0o000)
+        try:
+            st = sa.state(conn)
+            assert any("unreadable" in a["what"] for a in st["attention"])
+        finally:
+            src.chmod(0o644)
+
+
+class TestMcpSurvivesBadFrames:
+    """A batch frame is one line of valid JSON that the spec requires a server
+    to accept. It used to kill the process, stranding every lease it held."""
+
+    def _serve(self, tmp_path, frames):
+        import io
+
+        from superagentic.mcp import Server
+        out = io.StringIO()
+        Server(str(tmp_path / "w.db")).serve(io.StringIO(frames), out)
+        return [json.loads(ln) for ln in out.getvalue().splitlines() if ln.strip()]
+
+    @pytest.mark.parametrize("frame", ["[]", "null", "42", '"s"', "{}",
+                                       '{"params": [1,2]}', "true"])
+    def test_a_bad_frame_does_not_kill_the_process(self, tmp_path, frame):
+        replies = self._serve(
+            tmp_path, frame + '\n{"jsonrpc":"2.0","id":9,"method":"tools/list"}\n')
+        assert replies, "the server died before the valid request"
+        assert replies[-1]["id"] == 9, "a following valid request went unanswered"
+
+    def test_unparseable_json_is_answered(self, tmp_path):
+        replies = self._serve(tmp_path, "not json at all\n")
+        assert replies[0]["error"]["code"] == -32700
+
+    def test_a_non_object_is_a_protocol_error(self, tmp_path):
+        replies = self._serve(tmp_path, "42\n")
+        assert replies[0]["error"]["code"] == -32600
+
+    def test_does_not_reply_to_notifications(self, tmp_path):
+        """JSON-RPC 2.0: the server MUST NOT reply to a Notification. Real
+        clients send notifications/cancelled and progress routinely."""
+        for m in ("notifications/cancelled", "notifications/progress",
+                  "notifications/initialized"):
+            assert self._serve(
+                tmp_path, json.dumps({"jsonrpc": "2.0", "method": m}) + "\n") == []
+
+    def test_a_batch_is_answered_as_a_batch(self, tmp_path):
+        frame = json.dumps([
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            {"jsonrpc": "2.0", "method": "notifications/cancelled"},
+        ])
+        replies = self._serve(tmp_path, frame + "\n")
+        assert len(replies) == 1 and isinstance(replies[0], list)
+        assert [r["id"] for r in replies[0]] == [1]
+
+    def test_initialize_echoes_a_version_it_speaks(self, tmp_path):
+        from superagentic.mcp import Server
+        srv = Server(str(tmp_path / "w.db"))
+        r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "2025-06-18"}})
+        assert r["result"]["protocolVersion"] == "2025-06-18"
+        r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "1999-01-01"}})
+        assert r["result"]["protocolVersion"] in ("2024-11-05",)
+
+
+class TestSnapshotEscaping:
+    """A snapshot is the file people mail to each other."""
+
+    XSS = '</script><img src=x onerror=alert(1)>'
+
+    def _snapshot_with(self, tmp_path, **where):
+        from superagentic import dashboard
+        db = tmp_path / "w.db"
+        conn = sa.connect(db)
+        run = sa.start_run(conn, label=where.get("label", "run"))
+        sa.define(conn, "k", "i", done_when="d")
+        sa.add(conn, "k", [where.get("name", "u1"), "other"], run=run)
+        u = sa.claim(conn, "k", worker=where.get("worker", "w"), lease=600)[0]
+        if where.get("note"):
+            sa.fail(conn, u.unit_id, note=where["note"],
+                    worker=where.get("worker", "w"))
+        else:
+            sa.finish(conn, u.unit_id, worker=where.get("worker", "w"),
+                      result=where.get("result"))
+        sa.claim(conn, "k", worker="w2", lease=600)
+        return dashboard.snapshot(db)
+
+    @pytest.mark.parametrize("field", ["name", "worker", "note", "label"])
+    def test_the_script_terminator_is_escaped(self, tmp_path, field):
+        html = self._snapshot_with(tmp_path, **{field: self.XSS})
+        assert "</script><img" not in html
+        assert html.count("<script") == html.count("</script>")
+
+    def test_the_data_still_round_trips(self, tmp_path):
+        html = self._snapshot_with(tmp_path, name=self.XSS)
+        m = re.search(r"const DATA = (.*?);\s*//", html, re.S)
+        data = json.loads(m.group(1))
+        assert any(self.XSS in json.dumps(v) for v in data.values())
+
+    def test_a_javascript_line_terminator_does_not_break_the_page(self, tmp_path):
+        """U+2028 is legal in JSON and a literal newline in JavaScript."""
+        html = self._snapshot_with(tmp_path, name="a\u2028b")
+        m = re.search(r"const DATA = (.*?);\s*//", html, re.S)
+        assert "\u2028" not in m.group(1)
+
+
+class TestDashboardParams:
+
+    def test_a_malformed_limit_is_a_400_not_a_dropped_connection(self, tmp_path):
+        from superagentic import dashboard
+        db = tmp_path / "w.db"
+        sa.add(sa.connect(db), "k", ["u1"])
+        body = _FakeHandler(dashboard, db).get("/api/units?limit=abc")
+        assert body, "the connection was dropped"
+
+    def test_sessions_expire_server_side(self, tmp_path):
+        """The cookie said Max-Age=86400 and the server kept the id forever."""
+        from superagentic import dashboard
+        assert dashboard.SESSION_SECONDS == 86400
+        src = (ROOT / "src" / "superagentic" / "dashboard.py").read_text(
+            encoding="utf-8")
+        assert "SESSION_SECONDS" in src.split("def _authed")[1][:400], (
+            "_authed does not check age, so an expired cookie still works")

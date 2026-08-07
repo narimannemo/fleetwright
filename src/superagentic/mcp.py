@@ -30,6 +30,10 @@ from . import leases, shape
 
 PROTOCOL = "2024-11-05"
 
+#: Versions this server will answer in. Echoing back a version we do not speak
+#: would be a lie; answering only in ours ignores a client that asked politely.
+SPOKEN = ("2024-11-05", "2025-03-26", "2025-06-18")
+
 
 def _tools() -> list[dict]:
     # Written for an agent reading tool descriptions rather than documentation,
@@ -354,7 +358,7 @@ class Server:
         db = a.get("db", "work.db")
         return {"prompts": [
             leases.worker_prompt(self.conn, kind, db=db,
-                                 worker=f"agent-{i}" if n > 1 else "agent-1")
+                                 worker=f"agent-{i}" if n > 1 else None)
             for i in range(1, n + 1)],
             "note": "Spawn these in ONE message so the workers run at the "
                     "same time. Each is already told to stop when the queue "
@@ -398,12 +402,29 @@ class Server:
         return out
 
     def finish_job(self, a: dict) -> dict:
+        # Validate the follow-on stage BEFORE anything closes. Past the close
+        # there is no retry: the unit is done and the agent cannot reopen it.
+        try:
+            leases._check_then(a.get("then"))
+        except ValueError as e:
+            return {"ok": False, "finished": False, "error": "invalid_then",
+                    "message": f"{e} The unit is STILL YOURS: fix `then` and "
+                               f"call finish_job again."}
+        row = self.conn.execute("SELECT kind FROM unit WHERE unit_id = ?",
+                                (a["unit_id"],)).fetchone()
+        sp = leases.spec(self.conn, row["kind"]) if row else None
+        declared = (sp or {}).get("returns")
+        if a.get("result") is None and shape.parse(declared) is not None:
+            # A missing result is a shape violation. Skipping the check when
+            # there was no result taught agents to drop the result rather than
+            # fix its shape.
+            return {"ok": False, "finished": False, "error": "result_missing",
+                    "returns": declared,
+                    "message": "This kind declares a result and you sent none. "
+                               "The unit is STILL YOURS: call finish_job again "
+                               "with `result`."}
         if a.get("result") is not None:
-            row = self.conn.execute("SELECT kind FROM unit WHERE unit_id = ?",
-                                    (a["unit_id"],)).fetchone()
-            sp = leases.spec(self.conn, row["kind"]) if row else None
-            problems = shape.describe(sp.get("returns") if sp else None,
-                                      a["result"])
+            problems = shape.describe(declared, a["result"])
             if problems:
                 return {"ok": False, "finished": False,
                         "error": "result_shape",
@@ -451,12 +472,35 @@ class Server:
 
     # -- transport ---------------------------------------------------------
 
-    def handle(self, msg: dict) -> dict | None:
+    def handle(self, msg: Any) -> dict | None:
+        # A JSON-RPC batch is a LIST, and the spec requires a server to accept
+        # the frame even to refuse it. Anything that is not an object used to
+        # reach `.get` and raise AttributeError, which killed the process --
+        # and with it every lease this worker was holding. `echo null |
+        # superagentic serve` was the whole exploit.
+        if isinstance(msg, list):
+            replies = [r for r in (self.handle(m) for m in msg) if r is not None]
+            # An empty batch, or one that was all notifications, gets no reply
+            # at all rather than an empty array.
+            return replies or None            # type: ignore[return-value]
+        if not isinstance(msg, dict):
+            return {"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32600, "message": "Invalid Request"}}
         mid, method = msg.get("id"), msg.get("method")
+        # No `id` means notification, and the spec is explicit: the server MUST
+        # NOT reply to one. Real clients send notifications/cancelled and
+        # notifications/progress routinely, and every one of them used to draw
+        # a -32601 that some clients read as a desync.
+        if "id" not in msg and method not in (
+                "notifications/initialized", "initialized"):
+            return None
         if method == "initialize":
             from . import __version__
+            # Echo the client's version when we speak it, rather than always
+            # answering with ours.
+            want = (msg.get("params") or {}).get("protocolVersion")
             return {"jsonrpc": "2.0", "id": mid, "result": {
-                "protocolVersion": PROTOCOL,
+                "protocolVersion": want if want in SPOKEN else PROTOCOL,
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "superagentic", "version": __version__}}}
         if method in ("notifications/initialized", "initialized"):
@@ -491,7 +535,15 @@ class Server:
             try:
                 reply = self.handle(json.loads(line))
             except json.JSONDecodeError:
-                continue
+                # Answer rather than drop it. A client waiting on a reply that
+                # never comes hangs; one that gets -32700 knows to resend.
+                reply = {"jsonrpc": "2.0", "id": None, "error": {
+                    "code": -32700, "message": "Parse error"}}
+            except Exception as e:  # noqa: BLE001
+                # A worker's MCP server dying takes its leases with it, so any
+                # unhandled error is worth a reply and a live process.
+                reply = {"jsonrpc": "2.0", "id": None, "error": {
+                    "code": -32603, "message": f"{type(e).__name__}: {e}"}}
             if reply is not None:
                 stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
                 stdout.flush()

@@ -55,6 +55,11 @@ done_when = "every claim in the file is recorded, or you have established there 
 # lease, so it can fix the shape and finish again.
 returns = '{"claims": <int>, "notes": "<string>"}'
 
+# How many hand-outs before a unit of this kind stays failed instead of going
+# back in the queue. Belongs to the WORK: an expensive kind may deserve one
+# attempt and a flaky one five. Omit for the default of 3.
+# max_attempts = 3
+
 # What a worker must HAVE. It is told to fail rather than improvise without it.
 skills = ["house-style"]
 mcp    = { xrad = "xrad serve --db graph.db" }
@@ -123,7 +128,8 @@ def apply(conn, cfg: dict, *, root: Path | None = None,
                       tools=spec.get("tools"),
                       skills=spec.get("skills"),
                       mcp=spec.get("mcp"),
-                      context=ctx, force=force)
+                      context=ctx, max_attempts=spec.get("max_attempts"),
+                      force=force)
         out["kinds"].append(name)
     return out
 

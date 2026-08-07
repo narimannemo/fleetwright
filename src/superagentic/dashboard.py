@@ -59,6 +59,10 @@ PALETTE = {
     "failed": "#c53030",   # critical
 }
 
+#: How long a login lasts, server-side. Matches the cookie's Max-Age, so the
+#: two cannot disagree about whether someone is still signed in.
+SESSION_SECONDS = 86400
+
 PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1156,9 +1160,31 @@ if (DATA) {
 """
 
 
+def _json_for_script(data: dict) -> str:
+    """JSON safe to inline in a <script> block.
+
+    `json.dumps` escapes quotes and backslashes but NOT `</`, so a unit named
+    `</script><img src=x onerror=...>` closes the tag and the rest of the
+    document is attacker-controlled. That name does not need database access:
+    a worker calls `finish_job(then={"audit": ["</script>..."]})` over MCP and
+    the orchestrator's snapshot carries it. Unit names, run labels, notes,
+    results, worker names and model strings all reach this string, and a
+    snapshot is the file people mail to each other.
+
+    U+2028 and U+2029 are here because they are legal inside a JSON string and
+    are literal line terminators in JavaScript, so one in a name is a syntax
+    error rather than an exploit -- a blank page with a console message nobody
+    reads.
+    """
+    return (json.dumps(data, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+            .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+
 def page(db: Path, data: dict | None = None) -> str:
     return (PAGE.replace("__TITLE__", f"superagentic · {db.name}")
-                .replace("__DATA__", json.dumps(data) if data else "null"))
+                .replace("__DATA__", _json_for_script(data) if data else "null"))
 
 
 def _payload(conn, run: str | None, *, projects: list[str] | None = None,
@@ -1173,7 +1199,7 @@ def _payload(conn, run: str | None, *, projects: list[str] | None = None,
     handler so that a STATIC snapshot carries them too — otherwise the file
     renders with an empty sidebar, which is how this was found.
     """
-    return {**leases.stats(conn, run=run),
+    return {**leases.stats(conn, run=run, reclaim_first=False),
             "runs": leases.runs(conn, limit=25),
             "flow": leases.flow(conn, run=run),
             "graph": leases.graph(conn, run=run),
@@ -1191,7 +1217,7 @@ def _payload(conn, run: str | None, *, projects: list[str] | None = None,
 class _Handler(BaseHTTPRequestHandler):
     projects: dict[str, Path]
     token: str | None
-    sessions: set
+    sessions: dict
 
     # -- plumbing ----------------------------------------------------------
 
@@ -1206,6 +1232,18 @@ class _Handler(BaseHTTPRequestHandler):
         # Cheap and worth having on a page that renders names from a database.
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Strict, because everything here is inline and nothing is fetched:
+        # no CDN, no font, no image, no XHR to anywhere but this origin. A
+        # policy this tight would be painful on an ordinary page and costs
+        # nothing on one with no external dependencies -- and it is a second
+        # line behind the snapshot escaping, since an injected <script> has
+        # nowhere to send what it steals.
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "script-src 'unsafe-inline'; img-src data:; connect-src 'self'; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+        self.send_header("X-Frame-Options", "DENY")
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
@@ -1225,7 +1263,15 @@ class _Handler(BaseHTTPRequestHandler):
         if not self.token:
             return True
         sid = self._session()
-        return bool(sid and sid in self.sessions)
+        if not sid:
+            return False
+        born = self.sessions.get(sid)
+        if born is None:
+            return False
+        if time.time() - born > SESSION_SECONDS:
+            del self.sessions[sid]
+            return False
+        return True
 
     def _project(self, query: dict) -> tuple[str, Path] | tuple[None, None]:
         names = list(self.projects)
@@ -1262,14 +1308,23 @@ class _Handler(BaseHTTPRequestHandler):
             if db is None:
                 self._json({"error": "no such project"}, status=404)
                 return
-            conn = leases.connect(db)
+            conn = leases.connect_readonly(db)
             try:
                 one = lambda k: (q.get(k) or [None])[0]  # noqa: E731
+                try:
+                    # `?limit=abc` used to raise ValueError out of the handler,
+                    # which drops the connection: the browser reports a network
+                    # error and the log shows a traceback, for a typo.
+                    limit = min(int(one("limit") or 100), 500)
+                    offset = max(0, int(one("offset") or 0))
+                except ValueError:
+                    self._json({"error": "limit and offset must be whole "
+                                         "numbers"}, status=400)
+                    return
                 self._json(leases.units(
                     conn, run=one("run"), kind=one("kind"),
                     status=one("status"), q=one("q"),
-                    limit=min(int(one("limit") or 100), 500),
-                    offset=max(0, int(one("offset") or 0))))
+                    limit=limit, offset=offset))
             finally:
                 conn.close()
             return
@@ -1285,7 +1340,7 @@ class _Handler(BaseHTTPRequestHandler):
             run = (q.get("run") or [None])[0]
             # A fresh connection per request. sqlite3 objects are not safe to
             # share across threads, and this is a ThreadingHTTPServer.
-            conn = leases.connect(db)
+            conn = leases.connect_readonly(db)
             try:
                 self._json(_payload(conn, run, projects=list(self.projects),
                                     project=name, auth=bool(self.token)))
@@ -1299,7 +1354,7 @@ class _Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
         if path == "/logout":
             sid = self._session()
-            self.sessions.discard(sid)
+            self.sessions.pop(sid, None)
             self._send(b'{"ok":true}', "application/json",
                        cookie="sa_session=; Path=/; Max-Age=0; HttpOnly; "
                               "SameSite=Strict")
@@ -1326,7 +1381,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "wrong token"}, status=401)
                 return
             sid = secrets.token_urlsafe(32)
-            self.sessions.add(sid)
+            # Expire server-side too. The cookie says Max-Age=86400 and the
+            # server used to keep the id for the life of the process, so a
+            # cookie a browser had already discarded still authenticated.
+            now = time.time()
+            for old, born in list(self.sessions.items()):
+                if now - born > SESSION_SECONDS:
+                    del self.sessions[old]
+            self.sessions[sid] = now
             self._send(b'{"ok":true}', "application/json",
                        cookie=f"sa_session={sid}; Path=/; HttpOnly; "
                               "SameSite=Strict; Max-Age=86400")
@@ -1366,7 +1428,7 @@ def snapshot(db: Path, run: str | None = None) -> str:
     For attaching to a run, mailing to someone, or looking at a fleet that has
     already finished. No server, no refresh, nothing fetched.
     """
-    conn = leases.connect(db)
+    conn = leases.connect_readonly(db)
     try:
         return page(db, _payload(conn, run, projects=[db.stem], project=db.stem))
     finally:
@@ -1394,7 +1456,7 @@ def serve(db: Path | list[Path], *, host: str = "127.0.0.1", port: int = 8787,
             "  Either keep it on 127.0.0.1, or set a token:\n"
             "      superagentic dashboard --host 0.0.0.0 --token \"$(openssl rand -hex 24)\"")
     handler = type("Handler", (_Handler,), {
-        "projects": projects, "token": token, "sessions": set()})
+        "projects": projects, "token": token, "sessions": {}})
     with ThreadingHTTPServer((host, port), handler) as httpd:
         shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
         url = f"http://{shown}:{port}"

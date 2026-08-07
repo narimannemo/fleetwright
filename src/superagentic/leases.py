@@ -62,6 +62,11 @@ DEFAULT_LEASE = 900.0
 #: forever costs a worker every time.
 MAX_ATTEMPTS = 3
 
+#: Close a unit regardless of who holds it. The escape hatch for an operator
+#: cleaning up after a fleet that is gone, and the ONLY way to get the old
+#: behaviour where omitting the worker skipped the ownership check entirely.
+ANY = "*"
+
 OPEN, LEASED, DONE, FAILED = "open", "leased", "done", "failed"
 #: Terminal, like done and failed, and deliberately NOT a deletion. A queue
 #: that forgets what you cancelled cannot tell you later why a run is short.
@@ -124,6 +129,14 @@ CREATE TABLE IF NOT EXISTS kind (
     -- unit whose requirements it cannot meet instead of improvising.
     skills TEXT,
     mcp TEXT,
+    -- How many hand-outs before a unit of this kind stays failed instead of
+    -- going back in the queue. NULL means the module default. It lives HERE
+    -- rather than on a claim because retirement is a property of the work --
+    -- an expensive kind may deserve one attempt, a flaky one five -- and
+    -- because `reclaim` is global: a per-call flag applied to every expired
+    -- unit in the file, so one worker's `--max-attempts 1` retired other
+    -- kinds' units belonging to other runs.
+    max_attempts INTEGER,
     -- Read-only material every worker of this kind gets: a glossary, coding
     -- conventions, a schema. Deliberately set by whoever defines the kind and
     -- never written by a worker -- see `context` in docs/concepts.md for why
@@ -264,6 +277,13 @@ class Unit:
     skill_records: tuple[dict, ...] = ()
     mcp: dict[str, str] | None = None
     context: str = ""
+    #: The credential for this lease. A worker NAME is not one: two processes
+    #: told to call themselves `agent-1` are indistinguishable, so one can
+    #: close the other's unit. The token is unique per claim, so passing it
+    #: back proves you are the holder and not merely a namesake. Optional,
+    #: because a shell fleet should not have to plumb it through `jq` on day
+    #: one -- but every generated brief now carries it.
+    token: str = ""
 
     @property
     def seconds_left(self) -> float:
@@ -272,6 +292,10 @@ class Unit:
     def brief(self) -> str:
         """The whole assignment as text, for pasting into an agent's prompt."""
         parts = [f"UNIT: {self.name}   (kind: {self.kind}, id: {self.unit_id})"]
+        if self.token:
+            # Hand it back on finish. A worker name can be shared by two
+            # processes; this cannot.
+            parts.append(f"TOKEN: {self.token}   (pass it back: --token)")
         if self.attempts > 1:
             parts.append(f"NOTE: attempt {self.attempts}. A previous worker took "
                          "this and never finished it.")
@@ -363,12 +387,36 @@ def _migrate(conn: sqlite3.Connection) -> None:
                                   ("parent_unit_id", "TEXT"),
                                   ("spawned_by", "TEXT"))),
                         ("kind", (("skills", "TEXT"), ("mcp", "TEXT"),
-                                  ("context", "TEXT")))):
+                                  ("context", "TEXT"),
+                                  ("max_attempts", "INTEGER")))):
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         for col, decl in cols:
             if col not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     conn.commit()
+
+
+def connect_readonly(path: str | Path) -> sqlite3.Connection:
+    """Open an EXISTING lease file for reading. No schema, no migration.
+
+    `connect()` creates the file, runs `executescript(SCHEMA)`, the migration
+    `ALTER TABLE`s and the index script. That is right for a worker and wrong
+    for anything that polls: DDL every two seconds against a file a fleet is
+    writing to, and a typo in `--db` silently creating an empty database that
+    then reports a perfectly healthy zero units.
+
+    `mode=ro` puts the guarantee in SQLite rather than in a docstring. A write
+    through this handle raises `sqlite3.OperationalError` instead of quietly
+    succeeding, so "the dashboard cannot disturb the run" is enforced by the
+    database and not by everyone remembering.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(p)
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000")
+    return conn
 
 
 def connect(path: str | Path = "work.db") -> sqlite3.Connection:
@@ -416,7 +464,7 @@ def define(conn: sqlite3.Connection, kind: str, instructions: str, *,
            done_when: str | None = None, returns: str | None = None,
            tools: str | None = None, skills: list[str] | None = None,
            mcp: dict[str, str] | None = None, context: str | None = None,
-           force: bool = False) -> str:
+           max_attempts: int | None = None, force: bool = False) -> str:
     """Say what this kind of work IS, once, so every worker is told the same thing.
 
     The alternative is putting the instructions in the prompt that spawns the
@@ -483,9 +531,10 @@ def define(conn: sqlite3.Connection, kind: str, instructions: str, *,
          time.time()))
     conn.execute(
         "INSERT OR REPLACE INTO kind (kind, instructions, done_when, returns, "
-        "tools, skills, mcp, context, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "tools, skills, mcp, context, max_attempts, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (kind, instructions, done_when, returns, tools, sk, mc, context,
-         time.time()))
+         max_attempts, time.time()))
     conn.commit()
     return digest
 
@@ -510,7 +559,8 @@ def _to_unit(r: sqlite3.Row, spec_row: sqlite3.Row | None = None,
                 tuple(pinned) if pinned else (
                     tuple(json.loads(r["skills_used"])) if r["skills_used"] else ()),
                 json.loads(sp["mcp"]) if sp and sp["mcp"] else None,
-                _render(sp["context"] if sp else "", r["name"], meta))
+                _render(sp["context"] if sp else "", r["name"], meta),
+                r["lease_token"] or "")
 
 
 def unit_id(kind: str, name: str, run: str | None = None) -> str:
@@ -546,6 +596,28 @@ def add(conn: sqlite3.Connection, kind: str, names: list[str], *,
     return conn.execute("SELECT count(*) FROM unit").fetchone()[0] - before
 
 
+def _pins(conn: sqlite3.Connection,
+          specs: dict) -> tuple[dict[str, list[dict]], dict[str, str | None]]:
+    """What each kind's skills and definition ARE, right now.
+
+    Pinned at claim time and handed to the caller. Reading them back off the
+    row would return what it held before the update, and looking them up later
+    would report whatever they are now -- which is the exact question this
+    exists to answer when someone edits a skill halfway through a run.
+    """
+    pinned: dict[str, list[dict]] = {}
+    digests: dict[str, str | None] = {}
+    for k, sp in specs.items():
+        names = json.loads(sp["skills"]) if sp and sp["skills"] else []
+        pinned[k] = resolve_skills(conn, names) if names else []
+        # The DEFINITION too, not only the skills. A kind redefined mid-run
+        # otherwise leaves no record of what any unit was told.
+        digests[k] = kind_digest(
+            k, sp["instructions"], sp["done_when"], sp["returns"], sp["tools"],
+            sp["skills"], sp["mcp"], sp["context"]) if sp else None
+    return pinned, digests
+
+
 def claim(conn: sqlite3.Connection, kind: str | None = None, *,
           worker: str | None = None, lease: float = DEFAULT_LEASE,
           n: int = 1, max_attempts: int = MAX_ATTEMPTS,
@@ -564,7 +636,13 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
     drop the older system libraries some 3.11 installs still ship with.
     """
     worker = worker or this_worker()
-    reclaim(conn, max_attempts=max_attempts)
+    # NOT max_attempts. `reclaim` applies its limit to every expired unit in
+    # the FILE, so passing one caller's per-call flag through mass-retired
+    # other kinds and other runs: `claim b --max-attempts 1` retired three
+    # units of kind `a` belonging to nobody. Retirement is a per-unit policy
+    # and lives on the kind; this flag now bounds only what THIS call hands
+    # out, which is what its help text says.
+    reclaim(conn)
     token = uuid.uuid4().hex
     now = time.time()
     where, params = "", []
@@ -572,53 +650,82 @@ def claim(conn: sqlite3.Connection, kind: str | None = None, *,
         where, params = where + " AND kind = ?", [*params, kind]
     if run:
         where, params = where + " AND run_id = ?", [*params, run]
+
+    # Read the candidate kinds BEFORE claiming, so the pin can go into the very
+    # same UPDATE. It used to be a second statement after the commit, which
+    # left a window where a `leased` row had no `kind_digest` at all -- and a
+    # crash inside that window meant `brief_for` fell back to the CURRENT
+    # definition, which is precisely the wrong answer and the one this feature
+    # exists to prevent.
+    kinds = [r["kind"] for r in conn.execute(
+        f"SELECT DISTINCT kind FROM unit WHERE status = ? {where}",
+        [OPEN, *params]).fetchall()]
+    specs = {k: conn.execute("SELECT * FROM kind WHERE kind = ?", (k,)).fetchone()
+             for k in kinds}
+    pinned, digests = _pins(conn, specs)
+
+    # One CASE per column rather than a statement per row: still one write.
+    # `CASE kind END` with no WHEN is a syntax error, and an empty queue is the
+    # ordinary case -- every worker hits it on the way out.
+    case = ("CASE kind" + "".join(" WHEN ? THEN ?" for _ in kinds) + " END"
+            if kinds else "NULL")
+    case_sk = case_dg = case
+    sk_args = [x for k in kinds
+               for x in (k, json.dumps(pinned[k]) if pinned.get(k) else None)]
+    dg_args = [x for k in kinds for x in (k, digests.get(k))]
     conn.execute(
         f"""UPDATE unit
                SET status = ?, worker = ?, model = ?, spawned_by = ?,
                    leased_until = ?, lease_token = ?, claimed_at = ?,
+                   skills_used = {case_sk}, kind_digest = {case_dg},
                    attempts = attempts + 1, updated_at = ?
              WHERE unit_id IN (
                    SELECT unit_id FROM unit
                     WHERE status = ? {where}
                     ORDER BY priority DESC, created_at
                     LIMIT ?)""",
-        [LEASED, worker, model, spawned_by, now + lease, token, now, now, OPEN,
-         *params, n])
+        [LEASED, worker, model, spawned_by, now + lease, token, now,
+         *sk_args, *dg_args, now, OPEN, *params, n])
     conn.commit()
     rows = conn.execute(
         "SELECT * FROM unit WHERE lease_token = ? ORDER BY priority DESC, created_at",
         (token,)).fetchall()
-    # One lookup per distinct kind, not per unit: a batch of 20 is almost
-    # always 20 units of the same kind.
-    specs = {k: conn.execute("SELECT * FROM kind WHERE kind = ?", (k,)).fetchone()
-             for k in {r["kind"] for r in rows}}
+
+    # A kind enqueued between the pre-read and the claim is not in the CASE, so
+    # it lands unpinned. Rare, but "rare" is not "never" and an unpinned unit
+    # is the bug above. Pin it now, UNDER THE LEASE TOKEN -- without that
+    # predicate a stale claimer's late write lands on whoever holds the unit
+    # now, overwriting a correct digest with a stale one.
+    late = {r["kind"] for r in rows if r["kind_digest"] is None}
+    if late:
+        more = {k: conn.execute("SELECT * FROM kind WHERE kind = ?",
+                                (k,)).fetchone() for k in late}
+        p2, d2 = _pins(conn, more)
+        specs.update(more)
+        pinned.update(p2)
+        digests.update(d2)
+        for r in rows:
+            if r["kind_digest"] is None:
+                conn.execute(
+                    "UPDATE unit SET skills_used = ?, kind_digest = ? "
+                    "WHERE unit_id = ? AND lease_token = ?",
+                    (json.dumps(p2[r["kind"]]) if p2.get(r["kind"]) else None,
+                     d2.get(r["kind"]), r["unit_id"], token))
+        conn.commit()
+        rows = conn.execute(
+            "SELECT * FROM unit WHERE lease_token = ? "
+            "ORDER BY priority DESC, created_at", (token,)).fetchall()
     # Pin what the skills were AT CLAIM TIME, and hand the same records to the
     # caller. Reading them back out of the row would return the value the row
     # had before this update, and looking them up later would report whatever
     # they are now — which is the question this exists to answer when someone
     # edits a skill halfway through a run.
-    pinned: dict[str, list[dict]] = {}
-    digests: dict[str, str | None] = {}
-    for k, sp in specs.items():
-        names = json.loads(sp["skills"]) if sp and sp["skills"] else []
-        pinned[k] = resolve_skills(conn, names) if names else []
-        # Pin the DEFINITION too, not only the skills. A kind redefined
-        # mid-run otherwise leaves no record of what any unit was told, which
-        # is exactly the question you have when one unit's output looks wrong.
-        digests[k] = kind_digest(
-            k, sp["instructions"], sp["done_when"], sp["returns"], sp["tools"],
-            sp["skills"], sp["mcp"], sp["context"]) if sp else None
-    for r in rows:
-        conn.execute(
-            "UPDATE unit SET skills_used = ?, kind_digest = ? WHERE unit_id = ?",
-            (json.dumps(pinned[r["kind"]]) if pinned.get(r["kind"]) else None,
-             digests.get(r["kind"]), r["unit_id"]))
-    conn.commit()
     return [_to_unit(r, specs.get(r["kind"]), pinned.get(r["kind"]) or ())
             for r in rows]
 
 
 def heartbeat(conn: sqlite3.Connection, unit_ids: list[str], *, worker: str,
+              token: str | None = None,
               lease: float = DEFAULT_LEASE) -> int:
     """Push the expiry out on work still in progress.
 
@@ -629,17 +736,19 @@ def heartbeat(conn: sqlite3.Connection, unit_ids: list[str], *, worker: str,
     if not unit_ids:
         return 0
     now = time.time()
+    tok = " AND lease_token = ?" if token else ""
     cur = conn.execute(
         f"UPDATE unit SET leased_until = ?, updated_at = ? "
-        f"WHERE status = ? AND worker = ? AND unit_id IN "
+        f"WHERE status = ? AND worker = ?{tok} AND unit_id IN "
         f"({','.join('?' * len(unit_ids))})",
-        [now + lease, now, LEASED, worker, *unit_ids])
+        [now + lease, now, LEASED, worker, *([token] if token else []), *unit_ids])
     conn.commit()
     return cur.rowcount
 
 
 def _close(conn: sqlite3.Connection, unit_id: str, status: str, *,
-           worker: str | None, note: str | None, result: Any = None) -> bool:
+           worker: str | None, note: str | None, result: Any = None,
+           token: str | None = None) -> bool:
     now = time.time()
     # `worker` is KEPT on a terminal status and cleared only when the unit goes
     # back to open. Who finished what is the basis of every per-worker number,
@@ -652,15 +761,55 @@ def _close(conn: sqlite3.Connection, unit_id: str, status: str, *,
     args: list = [status, note,
                   None if result is None else json.dumps(result, ensure_ascii=False),
                   now, unit_id, LEASED]
-    if worker is not None:
+    if worker is not None and worker != ANY:
         sql += " AND worker=?"
         args.append(worker)
+    if token:
+        # Complementary to the worker predicate, not a replacement: `worker` is
+        # what every per-worker statistic is attributed by, and dropping it
+        # would break that. The token is what makes two processes sharing a
+        # name distinguishable.
+        sql += " AND lease_token=?"
+        args.append(token)
     cur = conn.execute(sql, args)
     conn.commit()
     return cur.rowcount > 0
 
 
+def _check_then(then: Any) -> None:
+    """Validate follow-on work BEFORE the close, which cannot be undone.
+
+    `add()` used to run after `_close` had already committed, and nothing
+    checked what was in `then`. A single bad element raised inside `add`, so
+    the caller saw an exception and believed the finish had failed -- while the
+    unit was `done`, the whole follow-on stage was silently lost, and it could
+    not be retried because the unit was closed. Over MCP the agent got
+    `{"ok": false}` on a unit that had in fact finished.
+
+    The explicit `str` check matters: a bare string is iterable, so
+    `then={"audit": "abc"}` enqueued one unit per CHARACTER.
+    """
+    if then is None:
+        return
+    if not isinstance(then, dict):
+        raise ValueError("then must be a dict of {kind: [name, ...]}, "
+                         f"got {type(then).__name__}")
+    for k, names in then.items():
+        if not isinstance(k, str) or not k:
+            raise ValueError(f"then: kind must be a non-empty string, got {k!r}")
+        if isinstance(names, str) or not isinstance(names, (list, tuple)):
+            raise ValueError(
+                f"then[{k!r}]: expected a list of names, got {names!r}"
+                + (" (a bare string would enqueue one unit per character)"
+                   if isinstance(names, str) else ""))
+        for nm in names:
+            if not isinstance(nm, str) or not nm:
+                raise ValueError(
+                    f"then[{k!r}]: names must be non-empty strings, got {nm!r}")
+
+
 def finish(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
+           token: str | None = None,
            note: str | None = None, result: Any = None,
            then: dict[str, list[str]] | None = None,
            tokens_in: int | None = None, tokens_out: int | None = None,
@@ -686,9 +835,18 @@ def finish(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
     Nothing is enqueued if the close failed, so a worker that lost its lease
     cannot inject work off the back of a unit it no longer owns.
     """
+    # Default to THIS process's identity, exactly as `claim` does. Leaving it
+    # None made the ownership predicate OPT-IN, so a worker whose lease had
+    # expired could still close a unit another worker now held: its stale
+    # result overwrote the live one, the live holder was refused, and the row
+    # was credited to the wrong worker. Pass worker=ANY for a deliberate
+    # unowned close.
+    worker = this_worker() if worker is None else worker
+    _check_then(then)
     parent = conn.execute("SELECT run_id FROM unit WHERE unit_id = ?",
                           (unit_id,)).fetchone()
-    ok = _close(conn, unit_id, DONE, worker=worker, note=note, result=result)
+    ok = _close(conn, unit_id, DONE, worker=worker, note=note, result=result,
+                token=token)
     if ok and any(v is not None for v in (tokens_in, tokens_out, cost)):
         conn.execute(
             "UPDATE unit SET tokens_in = ?, tokens_out = ?, cost = ? "
@@ -710,30 +868,49 @@ def finish(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
 
 
 def release(conn: sqlite3.Connection, unit_id: str, *, worker: str | None = None,
-            note: str | None = None) -> bool:
+            token: str | None = None, note: str | None = None) -> bool:
     """Give a unit back unfinished, without calling it a failure.
 
     For the worker that looks at a unit and decides it is not the right one to
     do — wrong language, empty page, out of budget. Returning it immediately is
     much better than holding the lease until it expires.
     """
-    return _close(conn, unit_id, OPEN, worker=worker, note=note)
+    # See `finish`: defaulting to None made the ownership check opt-in, so a
+    # stale worker could reopen a unit somebody else was actively working on.
+    worker = this_worker() if worker is None else worker
+    ok = _close(conn, unit_id, OPEN, worker=worker, note=note, token=token)
+    if ok:
+        # Give the attempt back. `claim` counts on the way OUT, which is right
+        # for a worker that might die holding the unit -- but a release is the
+        # opposite of dying, and this function is documented as "without
+        # calling it a failure". Without this, six honest hand-backs left the
+        # unit at attempts=6 with MAX_ATTEMPTS=3, so the next worker merely to
+        # crash sent it straight to `failed`.
+        conn.execute(
+            "UPDATE unit SET attempts = MAX(attempts - 1, 0) WHERE unit_id = ?",
+            (unit_id,))
+        conn.commit()
+    return ok
 
 
 def fail(conn: sqlite3.Connection, unit_id: str, *, note: str,
-         worker: str | None = None, max_attempts: int = MAX_ATTEMPTS) -> bool:
+         worker: str | None = None, token: str | None = None,
+         max_attempts: int = MAX_ATTEMPTS) -> bool:
     """Report a unit that could not be done, with the reason.
 
     Back to `open` while attempts remain, `failed` once they do not. The note
     survives either way — a queue that forgets why something failed makes the
     next person re-run it to find out.
     """
+    # See `finish`: without this, a stale worker's failure note could bury a
+    # live worker's unit, and burn the attempt that unit had left.
+    worker = this_worker() if worker is None else worker
     row = conn.execute("SELECT attempts FROM unit WHERE unit_id=?",
                        (unit_id,)).fetchone()
     if row is None:
         return False
     status = FAILED if row["attempts"] >= max_attempts else OPEN
-    return _close(conn, unit_id, status, worker=worker, note=note)
+    return _close(conn, unit_id, status, worker=worker, note=note, token=token)
 
 
 def reclaim(conn: sqlite3.Connection, *, max_attempts: int = MAX_ATTEMPTS,
@@ -746,17 +923,31 @@ def reclaim(conn: sqlite3.Connection, *, max_attempts: int = MAX_ATTEMPTS,
     have now died on it and the fourth will too.
     """
     t = time.time() if now is None else now
-    conn.execute(
+    # COALESCE, not assignment. A unit that failed twice with "OOM parsing page
+    # 12" and then had a worker die on it used to end up reading "lease expired
+    # and out of attempts" -- the tautology overwriting the only record of WHY,
+    # in the column `failures()` and the "Could not finish" panel exist to
+    # show. `cancel()` already did it this way.
+    # The limit comes from each unit's OWN kind, falling back to the argument
+    # and then the module default. Reading one caller's number and applying it
+    # to the whole file is what let `claim b --max-attempts 1` retire three
+    # units of an unrelated kind.
+    retired = conn.execute(
         "UPDATE unit SET status=?, worker=NULL, leased_until=NULL, "
-        "lease_token=NULL, note=?, updated_at=? "
-        "WHERE status=? AND leased_until < ? AND attempts >= ?",
-        (FAILED, "lease expired and out of attempts", t, LEASED, t, max_attempts))
-    cur = conn.execute(
+        "lease_token=NULL, note=COALESCE(note, ?), updated_at=? "
+        "WHERE status=? AND leased_until < ? AND attempts >= COALESCE("
+        "  (SELECT max_attempts FROM kind WHERE kind.kind = unit.kind), ?)",
+        (FAILED, "lease expired and out of attempts", t, LEASED, t,
+         max_attempts))
+    returned = conn.execute(
         "UPDATE unit SET status=?, worker=NULL, leased_until=NULL, "
         "lease_token=NULL, updated_at=? WHERE status=? AND leased_until < ?",
         (OPEN, t, LEASED, t))
     conn.commit()
-    return cur.rowcount
+    # Both, so "N expired lease(s) returned to the pool" counts the retirements
+    # too. Reporting only the reopened ones made a reclaim that retired six
+    # units and reopened none print "0".
+    return retired.rowcount + returned.rowcount
 
 
 def progress(conn: sqlite3.Connection, kind: str | None = None, *,
@@ -853,7 +1044,7 @@ def failures(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def stats(conn: sqlite3.Connection, *, buckets: int = 40,
-          run: str | None = None) -> dict:
+          run: str | None = None, reclaim_first: bool = True) -> dict:
     """Everything a dashboard needs, in one pass over the table.
 
     One function rather than a dozen queries because a dashboard polls, and a
@@ -865,9 +1056,20 @@ def stats(conn: sqlite3.Connection, *, buckets: int = 40,
     `throughput` is bucketed over the window the run actually spans, not over
     a fixed hour, because a fleet that finished in ninety seconds and one that
     ran overnight both have to be legible.
+
+    **`reclaim_first=False` for anything that polls.** The dashboard passes it.
+    Reclaiming on a read means a worker that is merely SLOW loses its lease to
+    whoever left a browser tab open, at the polling cadence — the exact failure
+    the "In flight" panel exists to make visible. A viewer must not be able to
+    change what it is viewing.
     """
     now = time.time()
-    reclaim(conn)
+    # Guarded, because this is the write that made a read-only viewer mutate
+    # the queue it was watching. See the docstring.
+    if reclaim_first:
+        reclaim(conn)
+    if buckets < 1:
+        buckets = 1
     rows = conn.execute(
         "SELECT * FROM unit" + (" WHERE run_id = ?" if run else ""),
         (run,) if run else ()).fetchall()
@@ -1002,7 +1204,7 @@ Your final message: how many units you completed, and their names."""
 
 
 def worker_prompt(conn: sqlite3.Connection, kind: str | None = None, *,
-                  db: str = "work.db", worker: str = "agent-1",
+                  db: str = "work.db", worker: str | None = None,
                   lease: float = DEFAULT_LEASE) -> str:
     """The prompt to spawn a worker with, generated from the kind.
 
@@ -1029,12 +1231,18 @@ def worker_prompt(conn: sqlite3.Connection, kind: str | None = None, *,
                    + "\nIf you cannot, say so and stop. Do not start work you "
                      "are not equipped for.")
     k = f" {kind}" if kind else ""
+    # No `--worker` unless one was asked for. This used to default to
+    # "agent-1", so spawning eight workers by running `prompt` eight times
+    # produced eight processes all called agent-1 -- indistinguishable to every
+    # ownership check, with no mutual exclusion at all. Omitted, `this_worker()`
+    # supplies a per-process identity that cannot collide.
+    w = f" --worker {worker}" if worker else ""
     return Template(WORKER_PROMPT).safe_substitute(
-        worker=worker, requires=req,
-        claim_cmd=f"superagentic claim{k} --db {db} --brief "
-                  f"--worker {worker} --model '<which model you are>' "
-                  f"--lease {lease:g}",
-        done_cmd=f"superagentic finish <unit_id> --db {db} --worker {worker} "
+        worker=worker or "set automatically, one per process", requires=req,
+        claim_cmd=f"superagentic claim{k} --db {db} --brief{w} "
+                  f"--model '<which model you are>' --lease {lease:g}",
+        done_cmd=f"superagentic finish <unit_id> --db {db}{w} "
+                 f"--token <token-from-your-brief> "
                  f"--result '<the JSON the brief asked for>'")
 
 
@@ -1234,7 +1442,7 @@ def register_skill(conn: sqlite3.Connection, name: str, *,
         try:
             if f.is_file():
                 content = f.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             content = None
     digest = (hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
               if content else None)
@@ -1452,17 +1660,33 @@ def state(conn: sqlite3.Connection, *, stale_after: float = 0.0) -> dict:
             "detail": ", ".join(f"{h['name']} by {h['worker']}" for h in stuck[:3]),
             "do": "superagentic status --who   # the workers may be gone",
         })
-    changed = []
+    changed, unreadable = [], []
     for sk in skills(conn):
         src = sk.get("source")
         if not (src and sk.get("digest")):
             continue
         f = Path(src)
         if f.is_file():
-            now_digest = hashlib.sha256(
-                f.read_text(encoding="utf-8").encode()).hexdigest()[:16]
+            try:
+                now_digest = hashlib.sha256(
+                    f.read_text(encoding="utf-8").encode()).hexdigest()[:16]
+            except (OSError, UnicodeDecodeError):
+                # A skill source that became binary or lost its read permission
+                # used to raise out of here forever -- and this is the function
+                # whose whole job is to be the first thing a new session calls.
+                # An entry point that cannot be entered is worse than a wrong
+                # digest, and an unreadable skill is exactly what `state` is
+                # for: report it, do not die on it.
+                unreadable.append(f"{sk['name']} ({src})")
+                continue
             if now_digest != sk["digest"]:
                 changed.append(sk["name"])
+    if unreadable:
+        attention.append({
+            "what": f"{len(unreadable)} skill source(s) unreadable",
+            "detail": ", ".join(unreadable),
+            "do": "check the file is still text and still readable",
+        })
     if changed:
         attention.append({
             "what": f"{len(changed)} skill(s) changed since registration",
