@@ -1209,7 +1209,7 @@ class TestBrandAndFreshness:
         snapshot is the artefact people mail to each other."""
         from fleetwright import dashboard
         page = dashboard.PAGE
-        assert 'class="wm-s">fleet' in page and 'class="wm-a">wright' in page
+        assert 'class="wm-s">Fleet' in page and 'class="wm-a">Wright' in page
         assert "data:image/png" not in page and "data:image/jpeg" not in page
 
     def test_brand_colours_are_their_own_tokens(self):
@@ -1438,7 +1438,7 @@ class TestReadmeIsTrue:
         # GitHub strips <style> from SVG rendered in a README, so the wordmark
         # has to carry presentation attributes or it renders as black text.
         assert "style" not in els, "SVG uses a <style> block; GitHub will strip it"
-        assert 'alt="fleetwright"' in self._readme(), \
+        assert 'alt="FleetWright"' in self._readme(), \
             "no alt text; PyPI cannot resolve the relative path and shows nothing"
 
     def test_no_em_dashes(self):
@@ -3377,3 +3377,37 @@ class TestTheShellPattern:
                     bad.append(f"{label}: {t}")
         assert not bad, "a close with nothing to prove ownership:\n  " + \
             "\n  ".join(bad)
+
+
+class TestTheBrandAsset:
+    """The shipped wordmark went through an entire rename still saying
+    SuperAgentic, in its <title> and both tspans, because nothing looked at
+    it. A logo is the one file where being out of date is most visible and
+    least likely to be noticed by a test suite."""
+
+    def test_the_svg_names_the_product(self):
+        svg = (ROOT / "assets" / "fleetwright.svg").read_text(encoding="utf-8")
+        assert "FleetWright" in svg
+        assert svg.count("FleetWright") >= 2, "<title> and aria-label both"
+        assert ">Fleet<" in svg and ">Wright<" in svg, "the two-tone split"
+
+    def test_no_asset_still_carries_the_old_name(self):
+        for f in (ROOT / "assets").rglob("*"):
+            if f.is_file() and f.suffix in (".svg", ".md"):
+                t = f.read_text(encoding="utf-8", errors="ignore").lower()
+                assert "superagentic" not in t, f.name
+
+    def test_the_name_is_capitalised_where_it_is_read_not_typed(self):
+        """`fleetwright` is a command and a package, so it stays lowercase
+        wherever someone types it. FleetWright is the product, so it is
+        capitalised wherever someone only reads it: the login heading, the
+        browser tab, the wordmark, and prose."""
+        from fleetwright import dashboard
+        page = dashboard.PAGE
+        assert "<h1>FleetWright</h1>" in page
+        src = (ROOT / "src" / "fleetwright" / "dashboard.py").read_text(
+            encoding="utf-8")
+        assert 'f"FleetWright · {db.name}"' in src, "the browser tab"
+        # And the other direction: every command a person types is lowercase.
+        for cmd in re.findall(r"fleetwright [a-z-]+", page):
+            assert cmd.islower(), cmd

@@ -1,4 +1,4 @@
-<img src="assets/fleetwright.svg" alt="fleetwright" width="420">
+<img src="assets/fleetwright.svg" alt="FleetWright" width="440">
 
 [![ci](https://github.com/narimannemo/fleetwright/actions/workflows/ci.yml/badge.svg)](https://github.com/narimannemo/fleetwright/actions/workflows/ci.yml)
 [![pypi](https://img.shields.io/pypi/v/fleetwright)](https://pypi.org/project/fleetwright/)
@@ -20,7 +20,7 @@ it needs two things it can only get by asking.
 2. **What am I supposed to do with it?** The task, what finished looks like,
    what to hand back, and which skills I need first.
 
-fleetwright is where both live. You define the work once and enqueue the
+FleetWright is where both live. You define the work once and enqueue the
 units; every worker claims one and is handed the assignment with it. Nothing
 collides, nothing guesses, and afterwards you can see what actually happened.
 

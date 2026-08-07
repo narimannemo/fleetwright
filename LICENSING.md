@@ -11,7 +11,7 @@ This is the open-core model — the same shape Langfuse, GitLab and Grafana use.
 
 ## What that means in practice
 
-**You can run fleetwright, for anything, forever, without asking.** Including
+**You can run FleetWright, for anything, forever, without asking.** Including
 inside a company, including as part of a product you sell, including as a
 managed service you charge for. Apache-2.0 grants that and it is not revocable.
 

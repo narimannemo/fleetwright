@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 116" width="480" height="93"
-     role="img" aria-label="SuperAgentic">
-  <title>SuperAgentic</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 116" width="512" height="93"
+     role="img" aria-label="FleetWright">
+  <title>FleetWright</title>
   <!-- Presentation attributes rather than a <style> block: GitHub sanitises
        embedded stylesheets out of SVG rendered in a README. paint-order puts
        the cream keyline behind the fill so it reads as the sticker outline
@@ -10,6 +10,6 @@
         font-style="italic" font-weight="900" font-size="76" letter-spacing="-2.5"
         stroke="#fbeecd" stroke-width="15" stroke-linejoin="round"
         paint-order="stroke">
-    <tspan fill="#0b1a2b">Super</tspan><tspan fill="#ef2b23">Agentic</tspan>
+    <tspan fill="#0b1a2b">Fleet</tspan><tspan fill="#ef2b23">Wright</tspan>
   </text>
 </svg>

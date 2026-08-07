@@ -369,7 +369,7 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 
 <div id="gate" hidden>
   <form class="gatebox" id="loginform">
-    <h1>fleetwright</h1>
+    <h1>FleetWright</h1>
     <p class="muted">This dashboard is protected by an access token.</p>
     <input type="password" id="token" placeholder="access token" autocomplete="off"
            autofocus>
@@ -383,10 +383,10 @@ a:focus-visible, [tabindex]:focus-visible, rect:focus-visible {
 <div class="shell" id="shell" hidden>
   <aside class="rail" id="rail">
     <div class="brand">
-      <span class="wordmark" aria-label="fleetwright">
-        <span class="wm-s">fleet</span><span class="wm-a">wright</span></span>
+      <span class="wordmark" aria-label="FleetWright">
+        <span class="wm-s">Fleet</span><span class="wm-a">Wright</span></span>
       <span class="wordmark short" aria-hidden="true">
-        <span class="wm-s">f</span><span class="wm-a">w</span></span>
+        <span class="wm-s">F</span><span class="wm-a">W</span></span>
       <button class="collapse" id="collapse" title="Collapse sidebar"
               aria-label="Collapse sidebar">&#8249;</button>
     </div>
@@ -1183,7 +1183,7 @@ def _json_for_script(data: dict) -> str:
 
 
 def page(db: Path, data: dict | None = None) -> str:
-    return (PAGE.replace("__TITLE__", f"fleetwright · {db.name}")
+    return (PAGE.replace("__TITLE__", f"FleetWright · {db.name}")
                 .replace("__DATA__", _json_for_script(data) if data else "null"))
 
 
