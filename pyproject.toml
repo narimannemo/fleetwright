@@ -67,7 +67,7 @@ packages = ["src/fleetwright"]
 # question becomes a licence problem. The published package is Apache-2.0
 # throughout.
 include = ["src/fleetwright", "tests", "examples", "docs", "packaging",
-           "assets", "README.md", "LICENSE", "LICENSING.md",
+           "assets", "bench", "README.md", "LICENSE", "LICENSING.md",
            "CHANGELOG.md", "CONTRIBUTING.md"]
 # `include` is not enough. Hatchling collects licence files from anywhere in
 # the tree as metadata, so ee/LICENSE landed in the sdist even though `ee` was

@@ -3358,8 +3358,14 @@ class TestTheShellPattern:
         sources = {
             "README.md": (ROOT / "README.md"),
             "examples/fleet.sh": (ROOT / "examples" / "fleet.sh"),
+            # Absent from the sdist on purpose -- users do not need our CI
+            # config -- and this test also runs inside the sdist.
             "ci.yml": (ROOT / ".github" / "workflows" / "ci.yml"),
         }
+        sources = {k: v for k, v in sources.items() if v.is_file()}
+        # A skip-if-missing check can quietly end up checking nothing. These
+        # two are in both filesystems, so their absence is a real failure.
+        assert {"README.md", "examples/fleet.sh"} <= set(sources), sources
         bad = []
         for label, path in sources.items():
             for line in path.read_text(encoding="utf-8").splitlines():
