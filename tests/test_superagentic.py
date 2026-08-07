@@ -3245,3 +3245,30 @@ class TestDashboardParams:
             encoding="utf-8")
         assert "SESSION_SECONDS" in src.split("def _authed")[1][:400], (
             "_authed does not check age, so an expired cookie still works")
+
+
+class TestTimelineLanes:
+
+    def test_a_reclaimed_unit_does_not_become_a_phantom_lane(self, tmp_path):
+        """A unit back in the pool keeps claimed_at and loses its worker. It
+        used to render as an ownerless lane at 100% busy that also set the
+        wall-clock for every real lane, so they all showed 0%."""
+        conn = sa.connect(str(tmp_path / "w.db"))
+        for k in ("abandoned", "worked"):
+            sa.define(conn, k, "i", done_when="d")
+        sa.add(conn, "abandoned", ["a1"])
+        sa.add(conn, "worked", ["w1"])
+        # Claimed, expired, returned to the pool -- and left there, so its row
+        # keeps claimed_at with no worker. Re-claiming it would erase the very
+        # state under test.
+        sa.claim(conn, "abandoned", worker="ghost")
+        _expire(conn)
+        sa.reclaim(conn)
+        assert conn.execute(
+            "SELECT worker, claimed_at FROM unit WHERE kind='abandoned'"
+        ).fetchone()["claimed_at"] is not None
+        u = sa.claim(conn, "worked", worker="real")[0]
+        sa.finish(conn, u.unit_id, worker="real")
+        tl = sa.timeline(conn)
+        assert all(lane["worker"] for lane in tl["lanes"]), "an ownerless lane"
+        assert [lane["worker"] for lane in tl["lanes"]] == ["real"]

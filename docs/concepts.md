@@ -80,10 +80,26 @@ for chunk in slow_work(u.name):
     sa.heartbeat(conn, [u.unit_id], worker=me)
 ```
 
-**Idempotent writes.** Make the thing you do at the end converge when repeated —
-an upsert keyed on content, a write to a path derived from the unit name. If
-your write appends, a duplicated unit duplicates data and no lease scheme will
-save you.
+**Heartbeats land between tool calls, not during one.** This is a real limit
+and it is structural. An agent inside a single long generation is blocked: it
+cannot call `heartbeat_job` in the middle of thinking, so the lease has to
+cover the worst-case latency of one model call, not the average. That is why
+the example uses `--lease 1800`. The cost is the other side of the same coin:
+a worker that dies holding that unit leaves it idle for thirty minutes, which
+is most of what a lease was for, in exactly the case that needed it. Nothing
+here fixes that. Size the lease to your slowest single generation and know what
+you are buying.
+
+**Unit-scoped writes.** Make the thing you do at the end keyed on the unit, so
+a duplicate overwrites rather than appends. If your write appends, a duplicated
+unit duplicates data and no lease scheme will save you.
+
+Note what that does *not* promise. "Idempotent, so a unit done twice
+converges" is true of deterministic work and false of generative work: two
+model runs over *record every claim it makes* produce two different,
+both-plausible extractions. Keying on the unit means you keep one of them
+rather than both. It does not mean you keep the same one. If which one matters,
+key on `(unit_id, attempt)` and choose deliberately.
 
 And handle the `False`: `finish` returns it when the lease was lost. The worker
 should stop and claim something else rather than carry on.
@@ -101,7 +117,41 @@ belongs.
 
 `release()` exists for the other case: a worker that looks at a unit and
 decides it is not the right one to do. It hands the unit straight back without
-being treated as a failure.
+being treated as a failure, and **gives the attempt back** — for a while it did
+not, so six honest hand-backs left a unit at the limit and the next worker
+merely to crash sent it straight to `failed`.
+
+**How many attempts is a property of the WORK, not of a claim.** It is declared
+on the kind:
+
+```bash
+superagentic define extract --instructions '...' --max-attempts 5
+```
+
+`reclaim()` is global — it sweeps every expired unit in the file — so it reads
+each unit's own kind. It used to be handed whatever `--max-attempts` the
+calling worker passed to `claim`, which meant `claim b --max-attempts 1`
+retired three units of an unrelated kind in an unrelated run. `--max-attempts`
+on `claim` now bounds only what that call hands out.
+
+## Clocks
+
+Every timestamp here is `time.time()`, and that is a deliberate choice rather
+than an oversight. A lease is an interval compared **across processes**, so
+`monotonic()` is not a drop-in: two processes have no shared monotonic origin.
+
+The consequences are worth knowing:
+
+- An NTP step **forward** expires every live lease at once, and the next
+  `claim` reclaims work that is still being done.
+- An NTP step **backward** freezes reclamation until wall-clock catches up.
+- Two machines whose clocks disagree write timestamps that disagree. A unit can
+  finish "before" the run that contains it started, which is why elapsed time
+  is computed as a span over every timestamp on record rather than as
+  `last - started`.
+
+None of this is hypothetical on a fleet spread over more than one host. Keep
+the machines on NTP, and size leases so a second or two of drift is noise.
 
 ## Capabilities: what a worker must HAVE
 

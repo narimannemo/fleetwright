@@ -1869,7 +1869,14 @@ def timeline(conn: sqlite3.Connection, *, run: str | None = None,
     the end". A node-link diagram cannot show any of that; a time axis shows
     all three at a glance.
     """
-    where, args = ["claimed_at IS NOT NULL"], []
+    # `worker IS NOT NULL` as well, because a unit returned to the pool KEEPS
+    # its claimed_at and loses its worker. Without this an expired lease became
+    # an ownerless lane labelled "?", stretching from whenever it was first
+    # claimed to now -- which also set the wall-clock for every other lane, so
+    # a fleet that ran for two minutes yesterday rendered as six workers at 0%
+    # busy over 44 hours. This panel is "who held what": a bar nobody holds is
+    # not an answer to it.
+    where, args = ["claimed_at IS NOT NULL", "worker IS NOT NULL"], []
     if run:
         where.append("run_id = ?")
         args.append(run)

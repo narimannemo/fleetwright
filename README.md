@@ -143,7 +143,17 @@ uvx superagentic demo
 ## A lease, not a lock
 
 This is the only genuinely hard part of the problem, and every other decision
-follows from it.
+follows from it. **It is also not new.** Leases are Gray and Cheriton, 1989;
+SQS shipped visibility timeouts in 2006 and Beanstalkd its TTR in 2007; and
+[litequeue](https://github.com/litements/litequeue) already does expiring
+claims on SQLite, with `retry_expired()` and a claim id that makes `done()`
+return false for a stale holder. If you want a small SQLite queue, use it.
+
+What is here and not there is everything above the queue: a **kind** that says
+what the work is so the ninth worker gets the same brief as the first, skills
+and definitions **hashed and pinned per unit** so you can tell what any unit
+was actually told, **runs** to scope a corpus, and a dashboard. The queue is
+the boring part, and it should be.
 
 **A lock held by a crashed worker is worse than no lock at all.** The unit is
 neither being worked nor available, and nothing in the system can tell a busy
@@ -163,10 +173,48 @@ in production:
 
 No timeout distinguishes those two cases. Two defences, and you want both:
 **heartbeat** while you work, so only genuinely stalled units are reclaimed,
-and make the write at the end **idempotent**, so a unit done twice converges.
+and make the write at the end **unit-scoped**, keyed on the unit name, so a
+duplicate overwrites rather than appends.
+
+That is deliberately weaker than "idempotent, so a unit done twice converges",
+which is what this used to say and is not true of the example on this page. Two
+model runs over *record every claim it makes, quoting verbatim* produce two
+different, both-plausible extractions. Overwriting keyed on the unit means you
+get one of them rather than both concatenated; it does not mean you get the
+same one. For deterministic work convergence is real. For generative work,
+plan on the two outputs differing, and if which one you keep matters, key on
+`(unit_id, attempt)` and choose.
 
 When a lease is lost, `finish` returns `False` rather than raising. Handle it.
 That worker no longer owns the unit and should claim a different one.
+
+## Does it hold up under contention
+
+```bash
+python bench/contention.py 64 5000
+```
+
+Real processes, not threads: the whole question is what SQLite does when N
+operating-system processes contend for one write lock on one file, and threads
+in one interpreter would measure almost nothing.
+
+On an 8-core M-series Mac, SQLite 3.50.4:
+
+| Workers | Units | Finished | Duplicates | `SQLITE_BUSY` | Throughput | p50 | p95 | p99 |
+|---|---|---|---|---|---|---|---|---|
+| 32 | 2,000 | 2,000 | **0** | **0** | 1,513/s | 0.3 ms | 11 ms | 165 ms |
+| 64 | 5,000 | 5,000 | **0** | **0** | 1,419/s | 0.7 ms | 48 ms | 667 ms |
+
+The two zeroes are the point. Duplicates would falsify the single atomic
+`UPDATE` that the whole safety argument rests on, and a `SQLITE_BUSY` reaching
+a caller would mean `busy_timeout` had failed to turn contention into waiting.
+
+**Read the tail, not the median.** At 64 workers the p99 claim takes two thirds
+of a second, and it gets worse the more workers you add, because they are
+queueing for one write lock. It does not matter here: a unit is an agent doing
+work for tens of seconds, so even 667 ms is under 3% of it. It would matter a
+great deal if your units were milliseconds long, and if they are, this is the
+wrong tool.
 
 ## Watching it run
 
@@ -174,6 +222,9 @@ That worker no longer owns the unit and should claim a different one.
 superagentic dashboard --db work.db          # http://127.0.0.1:8787
 superagentic dashboard --out fleet.html      # a static snapshot
 ```
+
+![The dashboard: a five-stage run, five workers, and the pipeline drawn as
+nodes and edges](docs/img/dashboard.png)
 
 `14 left` is the same number whether five workers are moving through the queue
 steadily or three have died and one is stuck on a page it will never finish.
@@ -190,8 +241,10 @@ Every panel exists to separate those two situations:
 | Could not finish | what needs a human |
 
 Served from `http.server` with the CSS and JS inline and the SVG drawn by hand.
-No framework, no build step, nothing fetched. It is read only, so pointing it
-at a live run cannot disturb the run, and a test enforces that. There is an
+No framework, no build step, nothing fetched. It opens the database read only
+(`mode=ro`, so SQLite refuses a write rather than the code promising not to
+make one) and a test drives every route against a live run and compares the
+tables before and after. There is an
 optional access token, and because there is no TLS the server **refuses to bind
 off loopback unless one is set**.
 
