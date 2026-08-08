@@ -3622,10 +3622,15 @@ class TestDashboardAuthHardening:
         for k, v in (headers or {}).items():
             req.add_header(k, v)
         try:
-            with urllib.request.urlopen(req, timeout=5) as r:
+            with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, dict(r.headers)
         except urllib.error.HTTPError as e:
             return e.code, dict(e.headers)
+        except OSError:
+            # A refused or reset connection under load. Not an answer, and
+            # NOT counted as a guess that got through -- 0 is neither 401
+            # nor 429, so it cannot make either assertion pass by accident.
+            return 0, {}
 
     def test_a_foreign_host_header_is_refused(self, tmp_path):
         """DNS rebinding. A page at evil.com whose DNS re-resolves to
@@ -3682,14 +3687,24 @@ class TestDashboardAuthHardening:
         """The old defence delayed each CONNECTION on a threaded server: 200
         wrong guesses ran in 2.1 seconds, 95 a second."""
         import concurrent.futures as cf
+
+        from fleetwright import dashboard
+        n = 60
         self._serve(tmp_path, 8765, token=("z" * 24))
-        with cf.ThreadPoolExecutor(max_workers=32) as ex:
+        # Eight, not thirty-two. The point is that the lockout counts guesses,
+        # not that the runner can hold thirty-two sockets open: at 32 the CI
+        # box refused connections and the error escaped the pool.
+        with cf.ThreadPoolExecutor(max_workers=8) as ex:
             codes = [c for c, _ in ex.map(
                 lambda i: self._post(8765, "/login", {"token": f"g{i}"}),
-                range(60))]
-        assert 429 in codes, "no lockout; every guess was allowed"
-        assert codes.count(401) <= dashboard_lockout_after() + 4, \
-            f"too many guesses got through: {codes.count(401)}"
+                range(n))]
+        tried = codes.count(401)
+        assert 429 in codes, f"no lockout; codes were {sorted(set(codes))}"
+        assert tried < n, "every guess was allowed"
+        # Generous: threads already in flight when the tenth failure lands are
+        # still counted, so the bound is the limit plus the pool, not the limit.
+        assert tried <= dashboard.LOCKOUT_AFTER + 8, \
+            f"{tried} guesses got through a limit of {dashboard.LOCKOUT_AFTER}"
 
     def test_the_real_token_still_works_after_someone_else_is_locked_out(
             self, tmp_path):
@@ -3726,7 +3741,3 @@ class TestDashboardAuthHardening:
         assert "compare_digest" in src
         assert "given == self.token" not in src
 
-
-def dashboard_lockout_after():
-    from fleetwright import dashboard
-    return dashboard.LOCKOUT_AFTER

@@ -50,10 +50,15 @@ measured against a running server.
 - `docs/dashboard.md` now states the threat model, including what is
   deliberately absent: no TLS, no accounts, no roles. A tool that ships its own
   half-implemented crypto is worse than one that says put it behind ssh.
-- Mutating each check away confirmed its test fails. One did not: with the
-  weak-token check removed, `serve()` bound the port and ran forever, so the
-  test **hung** rather than failed, and a hang reports as an infrastructure
-  problem. It now runs `serve` in a thread and fails if it is still alive.
+- Mutating each check away confirmed its test fails. Two did not, both in my
+  own tests. With the weak-token check removed, `serve()` bound the port and
+  ran forever, so the test **hung** rather than failed, and a hang reports as
+  an infrastructure problem; it now runs `serve` in a thread and fails if it
+  is still alive. And the parallel-guessing test opened 32 sockets at once,
+  which a CI runner refused, and the resulting `OSError` escaped the thread
+  pool as an error rather than a verdict. Eight sockets is enough to prove a
+  lockout counts guesses, and a refused connection is now scored as neither a
+  guess allowed nor a guess blocked.
 
 ## [0.22.0] — 2026-08-08
 
