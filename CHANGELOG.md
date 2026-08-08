@@ -5,6 +5,33 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.25.0] — 2026-08-08
+
+### Fixed
+
+- **A dashboard over several repositories was unreadable.** Every repository
+  holds the default `work.db`, and projects were named by filename, so the
+  first was called `work` and every other one fell back to its absolute path.
+  A project is now named after what you call it: the directory for a default
+  filename, the filename when it was chosen deliberately, and more of the path
+  only when two would otherwise collide. Three repositories now read
+  `myth-analysis`, `apply-intelligence`, `project-kzd`.
+
+### Added
+
+- **`FLEETWRIGHT_PROJECTS`**, a colon-separated list like `PATH`, so one export
+  in a profile shows every repository you work on. `--project` takes the same
+  values and is repeatable; both accept a database, a repository holding one,
+  or a directory of them.
+
+### Notes
+
+- The README leads with the dashboard screenshot rather than burying it 220
+  lines down, and gained a **Where the database lives** section: the pinning
+  env var, the upward search, what durability actually holds, and why `cp` is
+  the wrong way to copy a WAL database. That knowledge is what separates "the
+  queue reset itself" from "I opened a different file".
+
 ## [0.24.0] — 2026-08-08
 
 Both found by setting the tool up in an empty repository from scratch, which

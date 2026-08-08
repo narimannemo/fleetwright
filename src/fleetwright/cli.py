@@ -816,7 +816,13 @@ def _cmd_dashboard(a: argparse.Namespace) -> int:
         # Printed once, to stderr, so a pipe to a log file does not silently
         # swallow the only copy.
         print(f"  access token: {token}", file=sys.stderr)
-    dashboard.serve([db, *[Path(x) for x in (a.project or [])]],
+    # A colon-separated list, like PATH, because that is the shape people
+    # already have a mental model for and it needs no file anywhere. One
+    # export in a profile and `fleetwright dashboard` shows every repository
+    # you work on, each labelled by its directory.
+    from_env = [x for x in os.environ.get("FLEETWRIGHT_PROJECTS", "").split(os.pathsep) if x]
+    dashboard.serve([db, *[Path(x) for x in (a.project or [])],
+                     *[Path(x).expanduser() for x in from_env]],
                     host=a.host, port=a.port, open_browser=not a.no_open,
                     token=token, allow_host=a.allow_host)
     return 0
@@ -1097,7 +1103,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1",
                    help="loopback by default; off-loopback requires --token")
     s.add_argument("--project", action="append", metavar="PATH",
-                   help="another database, or a directory of them; repeatable")
+                   help="another database, a repository holding one, or a "
+                        "directory of them; repeatable. FLEETWRIGHT_PROJECTS "
+                        "is the same thing as a PATH-style list, so one "
+                        "export shows every repository you work on.")
     s.add_argument("--token", metavar="T",
                    help="access token, or `auto` to generate one and print it. "
                         "Prefer --token-file or FLEETWRIGHT_TOKEN: a flag "

@@ -1497,25 +1497,66 @@ class _Handler(BaseHTTPRequestHandler):
         """Silent. A poll every two seconds would bury anything worth reading."""
 
 
+#: Filenames that say nothing about the project. `work.db` is the default, so
+#: in a fleet of repositories every one of them is called `work` and the label
+#: carries no information at all.
+GENERIC = {"work", "fleetwright", "db", "queue"}
+
+
+def _candidates(f: Path) -> list[str]:
+    """Names for one database, shortest and most useful first.
+
+    A project is a repository, and the thing people call it is the directory,
+    not the file: three repos each holding the default `work.db` should read
+    `myth-analysis`, `apply-intelligence`, `project-kzd`. A non-default
+    filename is a deliberate choice and is used as-is.
+    """
+    parts = list(f.resolve().parts)
+    stem = f.stem
+    names: list[str] = []
+    if stem.lower() not in GENERIC:
+        names.append(stem)
+    # Then the directory, then more of the path, until something is unique.
+    dirs = parts[:-1]
+    for depth in range(1, min(len(dirs), 4) + 1):
+        tail = "/".join(dirs[-depth:])
+        names.append(tail if stem.lower() in GENERIC else f"{tail}/{stem}")
+    names.append(str(f))
+    return names
+
+
 def _projects(db: Path | list[Path]) -> dict[str, Path]:
     """Name -> database. A project IS a database; there is nothing else to it.
 
     Inventing a project table inside one of the databases would make one file
     the registry for the others, and then moving or deleting that file breaks
-    the rest. The filename is already the name people use.
+    the rest. The path is the identity; the label is chosen to be readable.
+
+    Every project gets the SHORTEST name that is unique among the ones being
+    shown. Before this, the first `work.db` was called `work` and every other
+    one fell back to its absolute path, so a dashboard over three repositories
+    read as one project plus two file paths.
     """
     paths = [db] if isinstance(db, Path | str) else list(db)
-    out: dict[str, Path] = {}
+    files: list[Path] = []
     for raw in paths:
         q = Path(raw)
         found = sorted(q.glob("*.db")) if q.is_dir() else [q]
         for f in found:
-            name = f.stem
-            # Two projects with the same stem in different directories would
-            # otherwise silently shadow each other.
-            if name in out and out[name] != f:
-                name = str(f)
-            out[name] = f
+            if f not in files:
+                files.append(f)
+
+    out: dict[str, Path] = {}
+    for f in files:
+        for name in _candidates(f):
+            # Unique against what is already placed AND against every other
+            # file's best guess, so two repositories cannot both take `work`.
+            clash = any(o != f and name in _candidates(o)[:1] for o in files)
+            if name not in out and not clash:
+                out[name] = f
+                break
+        else:
+            out[str(f)] = f
     return out
 
 

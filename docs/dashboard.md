@@ -280,6 +280,34 @@ s["eta_seconds"]     # None when nothing is left or nothing has finished
 Use it to fail a build, page someone, or print a line at the end of a run —
 the dashboard is one consumer of this, not the only one.
 
+## Several projects at once
+
+A project **is** a database. There is no project table and no registry file,
+because a registry makes one file the index for the others, and then moving or
+deleting that file breaks the rest.
+
+```bash
+export FLEETWRIGHT_PROJECTS="$HOME/code/apply-intelligence:$HOME/code/project-kzd"
+fleetwright dashboard
+```
+
+Colon-separated, like `PATH`, so it needs no new file and no new syntax to
+learn. `--project` takes the same values and is repeatable. Either accepts a
+database, a repository holding one, or a directory of them.
+
+**Each project is named after what you call it.** Every repository holds the
+default `work.db`, so naming by filename produced one project called `work` and
+gave every other one its absolute path. The label is now the shortest thing
+that is both informative and unique: the directory for a default filename, the
+filename when it was chosen deliberately, and more of the path only when two
+would otherwise collide.
+
+| On disk | In the sidebar |
+|---|---|
+| `~/code/myth-analysis/work.db` | `myth-analysis` |
+| `~/code/myth-analysis/audit.db` | `audit` |
+| `~/old/myth-analysis/work.db` and `~/new/myth-analysis/work.db` | `old/myth-analysis`, `new/myth-analysis` |
+
 ## Access, and what it is actually protecting against
 
 There are no user accounts. There is one shared token, because this is a

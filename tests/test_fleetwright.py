@@ -3793,3 +3793,69 @@ class TestMetaIsRendered:
         conn, u = self._claimed(tmp_path)
         raw = json.loads(conn.execute("SELECT meta FROM unit").fetchone()[0])
         assert raw["path"] == "scans/$name.txt"
+
+
+class TestProjectLabels:
+    """A project is a repository, and the thing people call it is the
+    directory, not the file. Every repository holds the default `work.db`, so
+    labelling by filename gave one project called `work` and the rest their
+    absolute paths."""
+
+    def _dbs(self, tmp_path, *names):
+        from fleetwright import dashboard
+        out = []
+        for n in names:
+            d = tmp_path / n
+            d.mkdir(parents=True, exist_ok=True)
+            sa.add(sa.connect(d / "work.db"), "k", ["a"])
+            out.append(d / "work.db")
+        return dashboard._projects(out)
+
+    def test_repositories_are_named_after_themselves(self, tmp_path):
+        ps = self._dbs(tmp_path, "myth-analysis", "apply-intelligence",
+                       "project-kzd")
+        assert set(ps) == {"myth-analysis", "apply-intelligence",
+                           "project-kzd"}
+
+    def test_no_project_falls_back_to_an_absolute_path(self, tmp_path):
+        ps = self._dbs(tmp_path, "a", "b", "c")
+        assert not any(k.startswith("/") for k in ps), ps
+
+    def test_a_deliberate_filename_wins_over_the_directory(self, tmp_path):
+        """`audit.db` was named on purpose; `work.db` was not."""
+        from fleetwright import dashboard
+        d = tmp_path / "repo"
+        d.mkdir()
+        for n in ("work.db", "audit.db"):
+            sa.add(sa.connect(d / n), "k", ["a"])
+        ps = dashboard._projects([d])
+        assert set(ps) == {"repo", "audit"}
+        assert ps["audit"].name == "audit.db"
+
+    def test_same_named_directories_are_still_distinguished(self, tmp_path):
+        """Two checkouts of the same repo, side by side."""
+        from fleetwright import dashboard
+        paths = []
+        for parent in ("old", "new"):
+            d = tmp_path / parent / "myth-analysis"
+            d.mkdir(parents=True)
+            sa.add(sa.connect(d / "work.db"), "k", ["a"])
+            paths.append(d / "work.db")
+        ps = dashboard._projects(paths)
+        assert len(ps) == 2, ps
+        assert all("myth-analysis" in k for k in ps), ps
+
+    def test_the_same_database_twice_is_one_project(self, tmp_path):
+        from fleetwright import dashboard
+        d = tmp_path / "repo"
+        d.mkdir()
+        sa.add(sa.connect(d / "work.db"), "k", ["a"])
+        ps = dashboard._projects([d / "work.db", d / "work.db"])
+        assert len(ps) == 1
+
+    def test_the_environment_lists_projects(self, tmp_path, monkeypatch):
+        """One export shows every repository you work on."""
+        src = (ROOT / "src" / "fleetwright" / "cli.py").read_text(
+            encoding="utf-8")
+        assert "FLEETWRIGHT_PROJECTS" in src
+        assert "os.pathsep" in src, "must split like PATH, not on a comma"

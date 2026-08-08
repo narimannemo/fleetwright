@@ -27,6 +27,9 @@ collides, nothing guesses, and afterwards you can see what actually happened.
 A library, a CLI, an MCP server and a dashboard, in one SQLite file, with **no
 dependencies at all**.
 
+[![The dashboard: a five-stage run, five workers at 72 to 91 percent busy, and
+the pipeline drawn as nodes and edges](docs/img/dashboard.png)](docs/dashboard.md)
+
 ## Start here
 
 ```bash
@@ -47,14 +50,26 @@ fleetwright status --who      # who is holding what, right now
 fleetwright dashboard         # or the whole picture in a browser
 ```
 
-If you would rather drive it yourself, everything below is what the skill is
-doing on your behalf. And if you run the same work often, put it in a file
-instead of a shell history:
+**A later session starts with one command:**
 
 ```bash
-fleetwright init      # writes a commented fleetwright.toml
-fleetwright apply     # registers the skills, defines the kinds, enqueues
+fleetwright state
 ```
+
+It finds the database, says which runs exist, which are still going, what
+failed, and ends with the literal next command. A new session has no memory of
+the last one, and this is how it gets the state instead of guessing at it.
+
+If you run the same work often, put it in a file rather than in a shell
+history, so it is reviewable and diffable:
+
+```bash
+fleetwright init                 # writes a commented fleetwright.toml
+RUN=$(fleetwright start --label "tomus II")
+fleetwright apply --run "$RUN"   # registers skills, defines kinds, enqueues
+```
+
+Everything below is what the skill does on your behalf.
 
 ## The shape of it
 
@@ -223,9 +238,6 @@ fleetwright dashboard --db work.db          # http://127.0.0.1:8787
 fleetwright dashboard --out fleet.html      # a static snapshot
 ```
 
-![The dashboard: a five-stage run, five workers, and the pipeline drawn as
-nodes and edges](docs/img/dashboard.png)
-
 `14 left` is the same number whether five workers are moving through the queue
 steadily or three have died and one is stuck on a page it will never finish.
 Every panel exists to separate those two situations:
@@ -237,6 +249,8 @@ Every panel exists to separate those two situations:
 | In flight | **is anyone stuck**, since anything held past 3x the p95 is marked |
 | Jobs | what happened to this one unit |
 | Workers and models | did one model do these faster, cheaper, or worse |
+| Who held what, when | one lane per worker on a time axis: **was the fleet saturated, and who sat idle** |
+| What caused what | the pipeline as nodes and edges, when one stage enqueues the next |
 | Skills in use | which version of which skill, and what nobody registered |
 | Could not finish | what needs a human |
 
@@ -253,6 +267,55 @@ skip: without it, a page you visit can point its own DNS at `127.0.0.1` and
 read your fleet, and the browser cannot stop it. For remote access the answer
 is an ssh tunnel rather than a network bind, and
 [docs/dashboard.md](docs/dashboard.md) says why.
+
+### Several repositories, one dashboard
+
+A project **is** a database. There is no registry, because a registry means one
+file becomes the index for the others and moving it breaks the rest.
+
+```bash
+export FLEETWRIGHT_PROJECTS="$HOME/code/apply-intelligence:$HOME/code/project-kzd"
+fleetwright dashboard
+```
+
+Each one appears in the sidebar under the name you call it by, which is its
+directory rather than its filename: every repository holds the default
+`work.db`, so labelling by filename gave one project called `work` and the rest
+their absolute paths. A database you deliberately named something else keeps
+that name.
+
+## Where the database lives
+
+This is worth two minutes, because getting it wrong looks exactly like data
+loss and is not.
+
+```bash
+export FLEETWRIGHT_DB="$PWD/work.db"    # do this once, per project
+```
+
+`work.db` is a relative default. Without pinning it, a worker that runs from a
+subdirectory opens a **different, empty** database and truthfully reports that
+there is nothing to do. Searching up the tree covers the common case, the way
+git finds a repository, and a name close to an existing database is refused as
+a typo rather than created. But a subagent inherits its parent's environment,
+so one export is what actually guarantees twenty workers share one queue no
+matter where each of them runs.
+
+Nothing here deletes rows: there is no `DELETE` and no `DROP` in the package.
+`journal_mode` is WAL and `synchronous` is FULL, so a commit is on disk before
+it returns, and a worker killed with SIGKILL loses nothing it committed.
+
+To copy one, do not use `cp`:
+
+```bash
+fleetwright backup work.db.2026-08-08
+```
+
+In WAL mode the most recent commits live in `work.db-wal`, so copying the one
+file silently gets a database missing whatever finished last, while being a
+perfectly valid database of an earlier moment. `backup` runs `VACUUM INTO`,
+which reads a live database without locking out the writers and writes one file
+with nothing beside it.
 
 ## From the shell
 

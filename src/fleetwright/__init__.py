@@ -86,7 +86,7 @@ def skill_text() -> str:
     return (Path(__file__).parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 __all__ = ["ANY", "CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
