@@ -318,6 +318,47 @@ that a session spawned it, so it has to be told. The environment variable is
 the useful form, because a subagent inherits its parent's environment and one
 export labels the whole fleet without editing any worker prompt.
 
+### `backup`
+
+```bash
+fleetwright backup work.db.2026-08-08
+```
+
+**`cp work.db elsewhere/` is the obvious thing to do and it is wrong.** In WAL
+mode the most recent commits live in `work.db-wal`, so copying the one file
+gets a database missing whatever finished last, and it fails silently, because
+what you copied is a perfectly valid database of an earlier moment. That is the
+shape of every "my data went backwards" report.
+
+`backup` runs `VACUUM INTO`, which reads a live database without taking a lock
+off the writers, folds the WAL in, and writes one file with nothing beside it.
+It refuses to overwrite: a backup command that can destroy the previous backup
+is not a backup command.
+
+### Which database am I talking to?
+
+Three ways to end up with an empty queue that reports itself as perfectly
+healthy, and what each now does:
+
+```bash
+cd sub && fleetwright status     # finds the project's work.db up the tree
+fleetwright status --db worrk.db # "did you mean work.db?", exit 2
+export FLEETWRIGHT_DB=/abs/work.db   # pins one file for the whole session
+```
+
+`work.db` is a **relative** default, so before this a subdirectory got its own
+brand-new database rather than the project's. It is now searched for up the
+tree, the way git finds a repository. An explicit `--db` is always honoured
+literally, but a name close to an existing database is a typo far more often
+than a new project, so that is refused rather than created; pass `--create` if
+you mean it. And any command that does create a file now says so on stderr,
+because a new database appearing in silence is indistinguishable from the old
+one having been emptied.
+
+`FLEETWRIGHT_DB` is the one to use for a fleet: a subagent inherits its
+parent's environment, so exporting it once points every worker at the same
+file no matter what directory each of them runs in.
+
 ### `lineage`
 
 ```bash

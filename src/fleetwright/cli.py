@@ -14,6 +14,7 @@ when the queue is dry, so a shell loop terminates on its own:
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import sys
@@ -22,9 +23,92 @@ from pathlib import Path
 
 from . import __version__, config, leases, shape
 
+#: Set this and every command in the shell, and every subagent that inherits
+#: the environment, talks to the same file regardless of where it runs.
+DB_ENV = "FLEETWRIGHT_DB"
+
+
+def _looks_like_ours(path: Path) -> bool:
+    """Is this a fleetwright database, as opposed to somebody else's SQLite?"""
+    import sqlite3 as _s
+    from contextlib import closing
+    try:
+        with closing(_s.connect(f"file:{path}?mode=ro", uri=True)) as c:
+            names = {r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        return {"unit", "kind"} <= names
+    except Exception:  # noqa: BLE001 - unreadable means not ours
+        return False
+
+
+def _neighbours(where: Path) -> list[Path]:
+    """Other fleetwright databases sitting next to the one that is missing."""
+    return [c for c in sorted(where.glob("*.db")) if _looks_like_ours(c)]
+
+
+def resolve_db(a: argparse.Namespace) -> Path:
+    """Which file this command means, and a loud refusal when that is unclear.
+
+    Every "the database reset itself" story is this function's fault, because
+    `connect()` creates whatever path it is handed. Two ways to lose a queue,
+    both silent, both reported as a perfectly healthy zero units:
+
+        cd sub && fleetwright status      # a SECOND work.db, in sub/
+        fleetwright status --db worrk.db  # a THIRD, from one typo
+
+    So: an explicit `--db` is honoured literally, but if it does not exist and
+    a real fleetwright database is sitting beside it, that is a typo far more
+    often than a new project, and it now says so instead of creating a file.
+    The default `work.db` is searched for UP the tree, the way git finds a
+    repository, so a subdirectory joins the project instead of starting a
+    rival one. `FLEETWRIGHT_DB` overrides both and is what a fleet should use,
+    since a subagent inherits the environment.
+    """
+    explicit = a.db != "work.db"
+    if not explicit and os.environ.get(DB_ENV):
+        return Path(os.environ[DB_ENV]).expanduser()
+
+    p = Path(a.db).expanduser()
+    if p.exists():
+        return p
+
+    if explicit:
+        # Only when the name is CLOSE to one that exists. "Is there any other
+        # database here" was the first rule and it was too blunt: a second
+        # queue called audit.db beside work.db is an ordinary thing to want,
+        # and refusing it would be a worse bug than the one being fixed.
+        # `worrk.db` against `work.db` is a typo; `audit.db` is not.
+        near = _neighbours(p.parent if str(p.parent) != "" else Path())
+        close = difflib.get_close_matches(
+            p.name, [c.name for c in near], n=3, cutoff=0.8)
+        if close and not getattr(a, "create", False):
+            print(f"no database at {p}", file=sys.stderr)
+            print(f"  did you mean {', '.join(close)}?", file=sys.stderr)
+            print("  a name this close to an existing database is a typo more "
+                  "often than a new project, and creating one silently is how "
+                  "a queue appears to have emptied itself.", file=sys.stderr)
+            print(f"  pass --create if you do mean a new one, or set {DB_ENV}.",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        return p
+
+    # The default, and nothing here. Walk up, like git looking for .git.
+    for d in [Path.cwd(), *Path.cwd().parents]:
+        cand = d / "work.db"
+        if cand.is_file() and _looks_like_ours(cand):
+            return cand
+    return p
+
 
 def _conn(a: argparse.Namespace):
-    return leases.connect(Path(a.db))
+    db = resolve_db(a)
+    fresh = not db.exists()
+    conn = leases.connect(db)
+    if fresh:
+        # Say it once, out loud. A new file that appears in silence is
+        # indistinguishable from the old one having been emptied.
+        print(f"created a new database at {db.resolve()}", file=sys.stderr)
+    return conn
 
 
 def _cmd_skill(a: argparse.Namespace) -> int:
@@ -522,7 +606,7 @@ def _find_db(explicit: str) -> Path | None:
 
 
 def _cmd_state(a: argparse.Namespace) -> int:
-    db = _find_db(a.db)
+    db = _find_db(str(resolve_db(a)))
     if db is None:
         print(f"no fleetwright database here (looked for {a.db} and *.db)")
         print()
@@ -677,9 +761,31 @@ def _cmd_reclaim(a: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_backup(a: argparse.Namespace) -> int:
+    src = resolve_db(a)
+    if not src.exists():
+        print(f"no database at {src}", file=sys.stderr)
+        return 2
+    conn = leases.connect_readonly(src)
+    try:
+        out = leases.backup(conn, a.to)
+    except FileExistsError as e:
+        print(f"{e} already exists; a backup that overwrites the last one is "
+              f"not a backup", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    print(f"{src} -> {out}  ({out.stat().st_size:,} bytes)")
+    print("  one file, with the WAL folded in. `cp` would have missed "
+          "whatever finished most recently.", file=sys.stderr)
+    return 0
+
+
 def _cmd_serve(a: argparse.Namespace) -> int:
     from .mcp import Server
-    Server(Path(a.db)).serve()
+    # Through the same resolution as every other command. An MCP server on a
+    # different file from the workers is a fleet that silently does nothing.
+    Server(resolve_db(a)).serve()
     return 0
 
 
@@ -690,7 +796,7 @@ def _cmd_demo(_a: argparse.Namespace) -> int:
 
 def _cmd_dashboard(a: argparse.Namespace) -> int:
     from . import dashboard
-    db = Path(a.db)
+    db = resolve_db(a)
     if a.out:
         Path(a.out).write_text(dashboard.snapshot(db, run=a.run), encoding="utf-8")
         print(f"wrote {a.out}")
@@ -698,7 +804,7 @@ def _cmd_dashboard(a: argparse.Namespace) -> int:
     # Env var as well as a flag: a token on the command line lands in shell
     # history and in `ps` output for anyone on the box.
     token = a.token or os.environ.get("FLEETWRIGHT_TOKEN")
-    dashboard.serve([Path(x) for x in ([a.db] + (a.project or []))],
+    dashboard.serve([db, *[Path(x) for x in (a.project or [])]],
                     host=a.host, port=a.port, open_browser=not a.no_open,
                     token=token)
     return 0
@@ -712,8 +818,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"fleetwright {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def common(sp):
-        sp.add_argument("--db", default="work.db")
+    def common(sp, creates: bool = True):
+        sp.add_argument("--db", default="work.db",
+                        help=f"defaults to work.db, searched for up the tree. "
+                             f"{DB_ENV} pins one for the whole session.")
+        if creates:
+            # Only on commands that can actually make one. `state` reports and
+            # `dashboard` reads; offering them a flag that does nothing is how
+            # a CLI teaches people that flags are decorative.
+            sp.add_argument("--create", action="store_true",
+                            help="make a new database even though a name this "
+                                 "close to it already exists")
         return sp
 
     s = common(sub.add_parser(
@@ -912,7 +1027,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=_cmd_release)
 
     s = common(sub.add_parser(
-        "state", help="where this project is, for a session that just arrived"))
+        "state", help="where this project is, for a session that just arrived"),
+        creates=False)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=_cmd_state)
 
@@ -951,13 +1067,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also take back units already in flight")
     s.set_defaults(fn=_cmd_cancel)
 
+    s = common(sub.add_parser(
+        "backup", help="a consistent copy, safe to take while a fleet runs"),
+        creates=False)
+    s.add_argument("to", help="the file to write; it must not exist")
+    s.set_defaults(fn=_cmd_backup)
+
     s = common(sub.add_parser("reclaim", help="return expired leases now"))
     s.set_defaults(fn=_cmd_reclaim)
 
     s = common(sub.add_parser("serve", help="run the MCP server on stdio"))
     s.set_defaults(fn=_cmd_serve)
 
-    s = common(sub.add_parser("dashboard", help="a live view of the fleet"))
+    s = common(sub.add_parser("dashboard", help="a live view of the fleet"),
+               creates=False)
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--host", default="127.0.0.1",
                    help="loopback by default; off-loopback requires --token")

@@ -396,6 +396,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def backup(conn: sqlite3.Connection, to: str | Path) -> Path:
+    """A consistent single-file copy, safe to take while a fleet is running.
+
+    `cp work.db elsewhere/` is the obvious thing to do and it is WRONG here.
+    In WAL mode the recent commits live in `work.db-wal`, so copying the one
+    file gets a database missing whatever finished most recently -- and it
+    fails silently, because what you copied is a perfectly valid database of
+    an earlier moment. That is the shape of every "my data went backwards"
+    report.
+
+    `VACUUM INTO` runs in a read transaction against a live database: it needs
+    no lock on the writers, folds the WAL in, and writes ONE file with nothing
+    left beside it.
+    """
+    out = Path(to).expanduser()
+    if out.exists():
+        # Refusing beats overwriting. A backup command that can destroy the
+        # previous backup is not a backup command.
+        raise FileExistsError(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    conn.execute("VACUUM INTO ?", (str(out),))
+    return out
+
+
 def connect_readonly(path: str | Path) -> sqlite3.Connection:
     """Open an EXISTING lease file for reading. No schema, no migration.
 

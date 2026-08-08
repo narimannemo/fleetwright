@@ -35,6 +35,7 @@ from .leases import (
     TERMINAL,
     Unit,
     add,
+    backup,
     brief_for,
     cancel,
     claim,
@@ -85,11 +86,11 @@ def skill_text() -> str:
     return (Path(__file__).parent / "skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 
 __all__ = ["ANY", "CANCELLED", "DEFAULT_LEASE", "DONE", "FAILED", "LEASED",
            "MAX_ATTEMPTS", "OPEN", "STATUSES", "TERMINAL",
-           "Unit", "add", "brief_for", "cancel", "claim", "connect", "connect_readonly",
+           "Unit", "add", "backup", "brief_for", "cancel", "claim", "connect", "connect_readonly",
            "define", "fail", "failures",
            "finish", "flow", "graph", "heartbeat", "iter_results", "kind_digest",
            "kind_versions", "leased", "lineage", "progress", "reclaim", "release",

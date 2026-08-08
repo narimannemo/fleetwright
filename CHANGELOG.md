@@ -5,6 +5,56 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.22.0] — 2026-08-08
+
+Prompted by "the database seems to reset". It never did: the package contains
+no `DELETE` and no `DROP`, `synchronous` is `FULL` so a commit is on disk
+before it returns, and a worker killed with SIGKILL mid-run loses nothing it
+committed (measured: 200 units added, 3 finished, 2 in flight, all exactly as
+left). What it had was three ways to open a **different, empty** file and
+report it as a perfectly healthy zero units.
+
+### Fixed
+
+- **`work.db` was resolved against the current directory.** `cd sub` made a
+  SECOND database and reported "no units queued" about it. The default is now
+  searched for up the tree, the way git finds a repository, so a subdirectory
+  joins the project instead of starting a rival.
+- **A typo in `--db` created a new database in silence.** `--db worrk.db` now
+  answers "did you mean work.db?" and exits 2. Only for names genuinely close
+  to an existing one: the first version of this refused *any* new database
+  beside an existing one, which would have blocked a second queue called
+  `audit.db` — an ordinary thing to want, and a worse bug than the one being
+  fixed. `--create` overrides.
+- **Creating a database is announced** on stderr. A new file appearing in
+  silence is indistinguishable from the old one having been emptied.
+- **`serve`, `dashboard` and `state` did not resolve the database the same way
+  as everything else.** An MCP server on a different file from its workers is a
+  fleet that silently does nothing.
+
+### Added
+
+- **`FLEETWRIGHT_DB`** pins one file for a whole session regardless of the
+  directory each command runs in. This is the one to use for a fleet, because
+  a subagent inherits its parent's environment.
+- **`fleetwright backup <path>`**, via `VACUUM INTO`. `cp work.db elsewhere/`
+  is the obvious thing to do and it is wrong: in WAL mode the recent commits
+  live in `work.db-wal`, so copying the one file gets a database missing
+  whatever finished last, and it fails silently because what you copied is a
+  valid database of an earlier moment. `backup` reads a live database without
+  locking out the writers, folds the WAL in, and writes one file with nothing
+  beside it. It refuses to overwrite, because a backup command that can destroy
+  the previous backup is not a backup command.
+
+### Notes
+
+- The flag sweep now follows helper calls **transitively**. `--create` is read
+  inside `resolve_db`, which `_conn` calls, and one level of following reported
+  it unread on all 26 subcommands. Following the chain is the honest fix;
+  extending the exemption list is not. It also caught that `--create` was
+  offered by `state` and `dashboard`, which never create anything.
+- Each of these has a test that was checked by reverting its fix.
+
 ## [0.21.0] — 2026-08-07
 
 **Renamed from `superagentic` to `fleetwright`.** Same project, same author,

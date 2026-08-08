@@ -1533,12 +1533,23 @@ class TestCLIWiring:
             if fn is None:
                 continue
             body = inspect.getsource(fn)
-            # Follow the module-level helpers the handler calls. `--result` is
-            # read inside _read_result, and a body-only scan calls that unread.
-            for helper in set(re.findall(r"\b(_[a-z_]+)\(a\b", body)):
-                target = getattr(cli, helper, None)
-                if target is not None:
-                    body += inspect.getsource(target)
+            # Follow the module-level helpers the handler calls, TRANSITIVELY.
+            # `--result` is read inside _read_result, and `--create` inside
+            # resolve_db, which _conn calls -- one level of following reported
+            # that as unread on all 26 subcommands. Following the chain is the
+            # honest version of the check; extending the exemption list is not.
+            seen, queue = set(), [body]
+            while queue:
+                chunk = queue.pop()
+                for helper in set(re.findall(r"\b([a-z_]+)\(a\b", chunk)):
+                    if helper in seen:
+                        continue
+                    seen.add(helper)
+                    target = getattr(cli, helper, None)
+                    if callable(target):
+                        src = inspect.getsource(target)
+                        body += src
+                        queue.append(src)
             for act in sp._actions:
                 if not act.option_strings or act.dest in ("help", "db"):
                     continue
@@ -3411,3 +3422,146 @@ class TestTheBrandAsset:
         # And the other direction: every command a person types is lowercase.
         for cmd in re.findall(r"fleetwright [a-z-]+", page):
             assert cmd.islower(), cmd
+
+
+class TestWhichDatabase:
+    """Every "the database reset itself" story is path resolution, not data
+    loss. The package contains no DELETE and no DROP; what it had was three
+    ways to open a NEW file and report a perfectly healthy zero units."""
+
+    def _run(self, cwd, *args):
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+        env.pop("FLEETWRIGHT_DB", None)
+        return subprocess.run([sys.executable, "-m", "fleetwright", *args],
+                              capture_output=True, text=True, cwd=str(cwd),
+                              env=env)
+
+    def _project(self, tmp_path):
+        proj = tmp_path / "project"
+        (proj / "sub").mkdir(parents=True)
+        self._run(proj, "define", "k", "--instructions", "i", "--done-when", "d")
+        self._run(proj, "add", "k", "p1", "p2", "p3")
+        return proj
+
+    def test_a_subdirectory_joins_the_project_instead_of_starting_a_rival(
+            self, tmp_path):
+        """`work.db` is relative, so `cd sub` used to make a SECOND database
+        and report "no units queued" about it."""
+        proj = self._project(tmp_path)
+        out = self._run(proj / "sub", "status")
+        assert "k" in out.stdout, out.stdout + out.stderr
+        assert not (proj / "sub" / "work.db").exists(), \
+            "a second database was created in the subdirectory"
+
+    def test_a_typo_is_refused_rather_than_created(self, tmp_path):
+        proj = self._project(tmp_path)
+        out = self._run(proj, "status", "--db", "worrk.db")
+        assert out.returncode == 2
+        assert "did you mean" in out.stderr and "work.db" in out.stderr
+        assert not (proj / "worrk.db").exists(), "created it anyway"
+
+    def test_create_overrides_the_refusal(self, tmp_path):
+        proj = self._project(tmp_path)
+        out = self._run(proj, "status", "--db", "worrk.db", "--create")
+        assert out.returncode == 0, out.stderr
+        assert (proj / "worrk.db").exists()
+
+    def test_a_genuinely_different_name_is_not_refused(self, tmp_path):
+        """The first version of this guard refused ANY new database next to an
+        existing one, which would have blocked a second queue -- an ordinary
+        thing to want, and a worse bug than the one being fixed."""
+        proj = self._project(tmp_path)
+        out = self._run(proj, "status", "--db", "audit.db")
+        assert out.returncode == 0, out.stderr
+        assert (proj / "audit.db").exists()
+
+    def test_creating_a_database_is_announced(self, tmp_path):
+        out = self._run(tmp_path, "status")
+        assert "created a new database" in out.stderr, \
+            "a file appearing in silence looks like the old one was emptied"
+
+    def test_the_environment_pins_one_file(self, tmp_path):
+        proj = self._project(tmp_path)
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "src"),
+               "FLEETWRIGHT_DB": str(proj / "work.db")}
+        out = subprocess.run(
+            [sys.executable, "-m", "fleetwright", "status"],
+            capture_output=True, text=True, cwd=str(tmp_path), env=env)
+        assert "k" in out.stdout, out.stdout + out.stderr
+
+    def test_state_reports_on_the_file_the_workers_use(self, tmp_path):
+        proj = self._project(tmp_path)
+        out = self._run(proj / "sub", "state")
+        assert "3 units" in out.stdout, out.stdout + out.stderr
+
+
+class TestDurability:
+    """The database itself is fine. Measured, not assumed."""
+
+    def test_the_package_never_deletes_a_row(self):
+        for f in (ROOT / "src" / "fleetwright").rglob("*.py"):
+            src = f.read_text(encoding="utf-8")
+            for verb in ("DELETE FROM", "DROP TABLE", "DROP INDEX"):
+                assert verb not in src, f"{f.name} contains {verb}"
+
+    def test_commits_are_flushed_to_disk(self, tmp_path):
+        """WAL relaxes durability only if you ask it to. Nothing here does, so
+        synchronous stays FULL and a commit survives power loss, not merely a
+        crashed process."""
+        conn = sa.connect(str(tmp_path / "w.db"))
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+
+    def test_a_killed_worker_loses_nothing_it_committed(self, tmp_path):
+        """SIGKILL: no cleanup, no close, WAL left hot."""
+        db = str(tmp_path / "w.db")
+        script = f"""
+import sys, time
+sys.path.insert(0, {str(ROOT / "src")!r})
+import fleetwright as sa
+c = sa.connect({db!r})
+sa.define(c, "k", "i", done_when="d")
+sa.add(c, "k", [f"u{{i}}" for i in range(200)])
+u = sa.claim(c, "k", worker="doomed", n=5)
+for x in u[:3]:
+    sa.finish(c, x.unit_id, worker="doomed", result={{"ok": 1}})
+print("ready", flush=True)
+while True: time.sleep(0.05)
+"""
+        proc = subprocess.Popen([sys.executable, "-c", script],
+                                stdout=subprocess.PIPE, text=True)
+        assert proc.stdout.readline().strip() == "ready"
+        proc.kill()
+        proc.wait(timeout=10)
+        p = sa.progress(sa.connect(db))["k"]
+        assert sum(p.values()) == 200, p
+        assert p["done"] == 3, p
+        assert p["leased"] == 2, p
+
+    def test_backup_captures_what_the_wal_still_holds(self, tmp_path):
+        """`cp` of the .db alone misses recent commits, silently, because what
+        it copied is a valid database of an earlier moment."""
+        import shutil
+        db = tmp_path / "w.db"
+        conn = sa.connect(db)
+        sa.define(conn, "k", "i", done_when="d")
+        sa.add(conn, "k", [f"u{i}" for i in range(50)])
+        assert (tmp_path / "w.db-wal").exists(), "no WAL, so nothing to prove"
+
+        naive = tmp_path / "naive.db"
+        shutil.copyfile(db, naive)
+        good = sa.backup(conn, tmp_path / "good.db")
+
+        assert not (tmp_path / "good.db-wal").exists(), "left a WAL beside it"
+        assert sa.progress(sa.connect(good))["k"]["open"] == 50
+        naive_total = sum(sa.progress(sa.connect(naive)).get("k", {}).values())
+        assert naive_total < 50, (
+            "the naive copy happened to be complete, so this test proves "
+            "nothing on this platform")
+
+    def test_backup_refuses_to_overwrite(self, tmp_path):
+        conn = sa.connect(tmp_path / "w.db")
+        sa.add(conn, "k", ["a"])
+        sa.backup(conn, tmp_path / "b.db")
+        with pytest.raises(FileExistsError):
+            sa.backup(conn, tmp_path / "b.db")
