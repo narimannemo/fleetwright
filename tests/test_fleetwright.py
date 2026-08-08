@@ -763,7 +763,9 @@ class _FakeHandler:
         h = H.__new__(H)
         h.projects = {self.db.stem: self.db}
         h.token = None
-        h.sessions = set()
+        h.sessions = {}
+        h.allowed_hosts = frozenset()      # not enforcing, as when bound to all
+        h.failures = {}
         h.path = path
         h.headers = {}
         h.wfile = io.BytesIO()
@@ -3565,3 +3567,166 @@ while True: time.sleep(0.05)
         sa.backup(conn, tmp_path / "b.db")
         with pytest.raises(FileExistsError):
             sa.backup(conn, tmp_path / "b.db")
+
+
+class TestDashboardAuthHardening:
+    """A dashboard on loopback is not a private dashboard.
+
+    Two assumptions were wrong and both were measured, not argued:
+    the browser's same-origin policy does not protect a localhost service
+    from a page that rebinds its own DNS, and `time.sleep(0.5)` on a wrong
+    token does not slow an attacker on a THREADED server.
+    """
+
+    def _serve(self, tmp_path, port, **kw):
+        """A real socket, because every one of these lives in the HTTP layer."""
+        import threading
+
+        from fleetwright import dashboard
+        db = tmp_path / "w.db"
+        sa.add(sa.connect(db), "k", ["u1"])
+        t = threading.Thread(
+            target=dashboard.serve,
+            args=([db],),
+            kwargs={"port": port, "open_browser": False, **kw},
+            daemon=True)
+        t.start()
+        for _ in range(60):
+            try:
+                self._get(port, "/api")
+                break
+            except Exception:
+                time.sleep(0.1)
+        return db
+
+    def _get(self, port, path, host=None, headers=None):
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
+        if host:
+            req.add_header("Host", host)
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def _post(self, port, path, body, headers=None):
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                     method="POST",
+                                     data=json.dumps(body).encode())
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers)
+
+    def test_a_foreign_host_header_is_refused(self, tmp_path):
+        """DNS rebinding. A page at evil.com whose DNS re-resolves to
+        127.0.0.1 is, to the browser, still evil.com talking to itself, so
+        same-origin lets it READ the response. Only the server can notice."""
+        self._serve(tmp_path, 8761)
+        code, body = self._get(8761, "/api", host="evil.example.com")
+        assert code == 421, f"served a foreign host: {body[:120]}"
+        assert b"unit" not in body, "leaked queue contents"
+
+    def test_our_own_names_still_work(self, tmp_path):
+        self._serve(tmp_path, 8762)
+        for h in (None, "localhost:8762", "127.0.0.1:8762"):
+            code, _ = self._get(8762, "/api", host=h)
+            assert code == 200, f"refused its own name {h}"
+
+    def _must_refuse(self, tmp_path, port, **kw):
+        """Assert serve() refuses, WITHOUT the test hanging if it does not.
+
+        Called directly, a serve() that fails to refuse binds the port and
+        runs forever, and the test times out instead of failing. A hang is
+        not a failure: it reports as an infrastructure problem, and I only
+        found this by mutating the check away and watching pytest sit there
+        for nine minutes.
+        """
+        import threading
+
+        from fleetwright import dashboard
+        db = tmp_path / "w.db"
+        sa.add(sa.connect(db), "k", ["u1"])
+        box = {}
+
+        def run():
+            try:
+                dashboard.serve([db], port=port, open_browser=False, **kw)
+            except BaseException as e:  # noqa: BLE001 - SystemExit included
+                box["raised"] = e
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(timeout=5)
+        assert "raised" in box, "it bound the port instead of refusing"
+        return str(box["raised"])
+
+    def test_a_short_token_is_refused_at_startup(self, tmp_path):
+        msg = self._must_refuse(tmp_path, 8763, token="abc")
+        assert "16" in msg, "does not say what the minimum is"
+
+    def test_off_loopback_without_a_token_is_refused(self, tmp_path):
+        msg = self._must_refuse(tmp_path, 8764, host="0.0.0.0")
+        assert "ssh -N -L" in msg, "does not offer the tunnel"
+
+    def test_guessing_is_locked_out_even_in_parallel(self, tmp_path):
+        """The old defence delayed each CONNECTION on a threaded server: 200
+        wrong guesses ran in 2.1 seconds, 95 a second."""
+        import concurrent.futures as cf
+        self._serve(tmp_path, 8765, token=("z" * 24))
+        with cf.ThreadPoolExecutor(max_workers=32) as ex:
+            codes = [c for c, _ in ex.map(
+                lambda i: self._post(8765, "/login", {"token": f"g{i}"}),
+                range(60))]
+        assert 429 in codes, "no lockout; every guess was allowed"
+        assert codes.count(401) <= dashboard_lockout_after() + 4, \
+            f"too many guesses got through: {codes.count(401)}"
+
+    def test_the_real_token_still_works_after_someone_else_is_locked_out(
+            self, tmp_path):
+        """A lockout that also locks out the owner is a denial of service
+        wearing a security hat. Same address here, so this is the strict
+        case: it must recover once the window passes."""
+        tok = "y" * 24
+        self._serve(tmp_path, 8766, token=tok)
+        code, _ = self._post(8766, "/login", {"token": tok})
+        assert code == 200
+
+    def test_a_cross_site_post_is_refused(self, tmp_path):
+        self._serve(tmp_path, 8767, token=("w" * 24))
+        code, _ = self._post(8767, "/login", {"token": "w" * 24},
+                             headers={"Origin": "https://evil.example.com"})
+        assert code == 403
+
+    def test_the_cookie_is_secure_only_behind_tls(self, tmp_path):
+        """Unconditionally Secure would make the cookie unusable over plain
+        loopback, which is most of the usage."""
+        tok = "v" * 24
+        self._serve(tmp_path, 8768, token=tok)
+        _, h = self._post(8768, "/login", {"token": tok})
+        assert "fw_session=" in h["Set-Cookie"]
+        assert "HttpOnly" in h["Set-Cookie"] and "SameSite=Strict" in h["Set-Cookie"]
+        assert "Secure" not in h["Set-Cookie"]
+        _, h2 = self._post(8768, "/login", {"token": tok},
+                           headers={"X-Forwarded-Proto": "https"})
+        assert "Secure" in h2["Set-Cookie"]
+
+    def test_the_token_is_compared_in_constant_time(self):
+        src = (ROOT / "src" / "fleetwright" / "dashboard.py").read_text(
+            encoding="utf-8")
+        assert "compare_digest" in src
+        assert "given == self.token" not in src
+
+
+def dashboard_lockout_after():
+    from fleetwright import dashboard
+    return dashboard.LOCKOUT_AFTER

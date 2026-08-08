@@ -5,6 +5,56 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.23.0] — 2026-08-08
+
+Authentication, looked at properly rather than assumed. Everything below was
+measured against a running server.
+
+### Fixed
+
+- **The dashboard answered to any `Host` header, so a web page could read it
+  by rebinding DNS.** This is the one that matters for the default local
+  configuration. A page at `evil.com` cannot normally read
+  `http://127.0.0.1:8787`, but it can publish a one-second TTL and re-resolve
+  its own name to `127.0.0.1`; the browser then believes the origin *is*
+  `evil.com`, same-origin is satisfied, and the page reads unit names, notes,
+  results, worker names and any paths in `meta`. The browser cannot detect
+  this and the server can, so it now answers `421` to a host it does not
+  answer to. `--allow-host` for a reverse proxy.
+- **A three-character token was accepted, and the brute-force defence did
+  nothing.** `time.sleep(0.5)` on a wrong guess was described in a comment as
+  slowing an attacker down; on a `ThreadingHTTPServer` it delays one connection
+  while sixty run beside it. Measured: 200 wrong guesses in 2.1 seconds, 95 a
+  second. Tokens under 16 characters are now refused at startup, and ten wrong
+  guesses from one address locks it out for a minute.
+- **`POST` accepted any `Origin`.** `SameSite=Strict` already kept the session
+  cookie off cross-site requests, so this is depth, but it is two lines.
+- **The session cookie was still called `sa_session`**, and never carried
+  `Secure`. Now `fw_session`, with `Secure` when `X-Forwarded-Proto: https`
+  says the connection really is TLS. Not unconditionally: that would make the
+  cookie unusable over plain loopback, which is most of the usage.
+
+### Added
+
+- **`--token auto`** generates one and prints it, so nobody has to invent one.
+- **`--token-file` / `FLEETWRIGHT_TOKEN_FILE`**, because a flag lands in shell
+  history and in `ps` output for every other user on the machine.
+- **`--allow-host`**, required behind a reverse proxy, where the legitimate
+  host name is whatever the proxy passes.
+- The off-loopback refusal now offers the **ssh tunnel** as the first answer
+  rather than a token, since a token over plain HTTP feels like protection and
+  is not.
+
+### Notes
+
+- `docs/dashboard.md` now states the threat model, including what is
+  deliberately absent: no TLS, no accounts, no roles. A tool that ships its own
+  half-implemented crypto is worse than one that says put it behind ssh.
+- Mutating each check away confirmed its test fails. One did not: with the
+  weak-token check removed, `serve()` bound the port and ran forever, so the
+  test **hung** rather than failed, and a hang reports as an infrastructure
+  problem. It now runs `serve` in a thread and fails if it is still alive.
+
 ## [0.22.0] — 2026-08-08
 
 Prompted by "the database seems to reset". It never did: the package contains

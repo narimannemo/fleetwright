@@ -803,10 +803,18 @@ def _cmd_dashboard(a: argparse.Namespace) -> int:
         return 0
     # Env var as well as a flag: a token on the command line lands in shell
     # history and in `ps` output for anyone on the box.
+    tf = a.token_file or os.environ.get("FLEETWRIGHT_TOKEN_FILE")
     token = a.token or os.environ.get("FLEETWRIGHT_TOKEN")
+    if tf:
+        token = Path(tf).expanduser().read_text(encoding="utf-8").strip()
+    if token == "auto":
+        token = dashboard.new_token()
+        # Printed once, to stderr, so a pipe to a log file does not silently
+        # swallow the only copy.
+        print(f"  access token: {token}", file=sys.stderr)
     dashboard.serve([db, *[Path(x) for x in (a.project or [])]],
                     host=a.host, port=a.port, open_browser=not a.no_open,
-                    token=token)
+                    token=token, allow_host=a.allow_host)
     return 0
 
 
@@ -1086,8 +1094,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="loopback by default; off-loopback requires --token")
     s.add_argument("--project", action="append", metavar="PATH",
                    help="another database, or a directory of them; repeatable")
-    s.add_argument("--token", help="access token; prefer FLEETWRIGHT_TOKEN, "
-                                   "since a flag lands in shell history and ps")
+    s.add_argument("--token", metavar="T",
+                   help="access token, or `auto` to generate one and print it. "
+                        "Prefer --token-file or FLEETWRIGHT_TOKEN: a flag "
+                        "lands in shell history and in `ps` for every user "
+                        "on the machine.")
+    s.add_argument("--token-file", metavar="FILE",
+                   help="read the token from a file, so it is never an "
+                        "argument. FLEETWRIGHT_TOKEN_FILE also works.")
+    s.add_argument("--allow-host", action="append", metavar="NAME",
+                   help="a host name this dashboard may be reached by, for a "
+                        "reverse proxy. Repeatable. Loopback is always "
+                        "allowed; anything else is refused, which is what "
+                        "stops a web page rebinding its DNS to 127.0.0.1 and "
+                        "reading your fleet.")
     s.add_argument("--run", help="open on this run rather than everything")
     s.add_argument("--out", help="write a static snapshot instead of serving")
     s.add_argument("--no-open", action="store_true",

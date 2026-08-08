@@ -244,9 +244,15 @@ Served from `http.server` with the CSS and JS inline and the SVG drawn by hand.
 No framework, no build step, nothing fetched. It opens the database read only
 (`mode=ro`, so SQLite refuses a write rather than the code promising not to
 make one) and a test drives every route against a live run and compares the
-tables before and after. There is an
-optional access token, and because there is no TLS the server **refuses to bind
-off loopback unless one is set**.
+tables before and after. There is an optional access token, and because there is no TLS the server
+**refuses to bind off loopback unless one is set**, refuses a token shorter
+than 16 characters, and locks out an address after ten wrong guesses.
+
+It also **checks the `Host` header**, which is the defence most local tools
+skip: without it, a page you visit can point its own DNS at `127.0.0.1` and
+read your fleet, and the browser cannot stop it. For remote access the answer
+is an ssh tunnel rather than a network bind, and
+[docs/dashboard.md](docs/dashboard.md) says why.
 
 ## From the shell
 

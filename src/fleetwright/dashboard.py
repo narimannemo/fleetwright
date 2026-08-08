@@ -63,6 +63,16 @@ PALETTE = {
 #: two cannot disagree about whether someone is still signed in.
 SESSION_SECONDS = 86400
 
+#: Named once so the cookie header and the parser cannot drift apart.
+COOKIE = "fw_session"
+
+#: Wrong tokens allowed from one address before it is locked out, and for how
+#: long. Generous enough that a person fumbling a paste is not punished, tight
+#: enough that guessing is hopeless: at 10 per minute, even a five-character
+#: token outlives the patience of anyone doing it by hand.
+LOCKOUT_AFTER = 10
+LOCKOUT_WINDOW = 60.0
+
 PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1218,6 +1228,8 @@ class _Handler(BaseHTTPRequestHandler):
     projects: dict[str, Path]
     token: str | None
     sessions: dict
+    allowed_hosts: frozenset
+    failures: dict
 
     # -- plumbing ----------------------------------------------------------
 
@@ -1252,12 +1264,72 @@ class _Handler(BaseHTTPRequestHandler):
     def _json(self, obj, status: int = 200) -> None:
         self._send(json.dumps(obj).encode(), "application/json", status=status)
 
+    def _host_ok(self) -> bool:
+        """Reject a request that names a host we are not.
+
+        This is the defence against **DNS rebinding**, and without it a
+        loopback dashboard with no token is readable by any web page you
+        visit. The browser's same-origin policy is not enough on its own: a
+        page at evil.com whose DNS re-resolves to 127.0.0.1 with a one second
+        TTL is, as far as the browser is concerned, still evil.com talking to
+        evil.com -- so it may read the response. The server has to notice that
+        the Host header is not one of its own names, because the browser
+        cannot.
+
+        Checked only when we can enumerate our own names. Bound to 0.0.0.0
+        behind a proxy, the legitimate Host is whatever the proxy passes and
+        we would be guessing; there a token is already mandatory, and rebinding
+        against a token gets a 401 because the browser would send evil.com's
+        cookies, not ours. `--allow-host` restores the check for that case.
+        """
+        if not self.allowed_hosts:
+            return True
+        raw = (self.headers.get("Host") or "").strip()
+        # Strip the port, and the brackets around a literal IPv6 address.
+        name = raw.rsplit(":", 1)[0] if raw.count(":") == 1 else raw
+        if name.startswith("[") and "]" in name:
+            name = name[1:name.index("]")]
+        return name.lower() in self.allowed_hosts
+
+    def _origin_ok(self) -> bool:
+        """A state-changing request must not come from another site.
+
+        `SameSite=Strict` already keeps the session cookie off cross-site
+        requests, so this is depth rather than the primary defence. It is two
+        lines and it closes the case where a browser does not honour SameSite.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True                      # curl, a fetch with no Origin
+        try:
+            host = urllib.parse.urlparse(origin).hostname or ""
+        except ValueError:
+            return False
+        return (not self.allowed_hosts) or host.lower() in self.allowed_hosts
+
+    def _locked_out(self) -> float:
+        """Seconds remaining on a lockout, or 0.
+
+        The old defence was `time.sleep(0.5)` on a wrong token, described in a
+        comment as slowing an attacker down. Measured, it did not: this is a
+        ThreadingHTTPServer, so the sleep delays one CONNECTION while sixty
+        others run beside it. 200 wrong guesses took 2.1 seconds -- 95 per
+        second. A counter is what actually costs an attacker something.
+        """
+        ip = self.client_address[0]
+        now = time.time()
+        hits = [t for t in self.failures.get(ip, []) if now - t < LOCKOUT_WINDOW]
+        self.failures[ip] = hits
+        if len(hits) >= LOCKOUT_AFTER:
+            return LOCKOUT_WINDOW - (now - hits[-LOCKOUT_AFTER])
+        return 0.0
+
     def _session(self) -> str | None:
         raw = self.headers.get("Cookie")
         if not raw:
             return None
-        return SimpleCookie(raw).get("sa_session", None) and \
-            SimpleCookie(raw)["sa_session"].value
+        return SimpleCookie(raw).get(COOKIE, None) and \
+            SimpleCookie(raw)[COOKIE].value
 
     def _authed(self) -> bool:
         if not self.token:
@@ -1283,6 +1355,12 @@ class _Handler(BaseHTTPRequestHandler):
     # -- routes ------------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 - the base class names it
+        if not self._host_ok():
+            # 421 is the honest status: this request reached the right socket
+            # and the wrong server.
+            self._json({"error": "this server does not answer to that host "
+                                 "name; see --allow-host"}, status=421)
+            return
         u = urllib.parse.urlparse(self.path)
         path, q = u.path.rstrip("/") or "/", urllib.parse.parse_qs(u.query)
 
@@ -1351,18 +1429,30 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            self._json({"error": "this server does not answer to that host "
+                                 "name; see --allow-host"}, status=421)
+            return
+        if not self._origin_ok():
+            self._json({"error": "cross-site request refused"}, status=403)
+            return
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
         if path == "/logout":
             sid = self._session()
             self.sessions.pop(sid, None)
             self._send(b'{"ok":true}', "application/json",
-                       cookie="sa_session=; Path=/; Max-Age=0; HttpOnly; "
-                              "SameSite=Strict")
+                       cookie=f"{COOKIE}=; Path=/; Max-Age=0; HttpOnly; "
+                              f"SameSite=Strict")
             return
 
         if path == "/login":
             if not self.token:
                 self._json({"ok": True})
+                return
+            wait = self._locked_out()
+            if wait > 0:
+                self._json({"ok": False, "error": "too many attempts",
+                            "retry_after": int(wait) + 1}, status=429)
                 return
             n = int(self.headers.get("Content-Length") or 0)
             # Bounded read: an unbounded one lets any client make the server
@@ -1375,9 +1465,9 @@ class _Handler(BaseHTTPRequestHandler):
             # compare_digest, so a wrong token does not leak its correct
             # prefix through how long the comparison took.
             if not hmac.compare_digest(str(given), self.token):
-                # Slows a brute-force attempt without being a real rate limit;
-                # the actual defence is that the token should be long.
-                time.sleep(0.5)
+                self.failures.setdefault(
+                    self.client_address[0], []).append(time.time())
+                time.sleep(0.5)      # still costs a serial attacker something
                 self._json({"ok": False, "error": "wrong token"}, status=401)
                 return
             sid = secrets.token_urlsafe(32)
@@ -1389,9 +1479,16 @@ class _Handler(BaseHTTPRequestHandler):
                 if now - born > SESSION_SECONDS:
                     del self.sessions[old]
             self.sessions[sid] = now
+            # `Secure` only when the connection really is TLS, which here
+            # means a proxy said so. Setting it unconditionally would make the
+            # cookie unusable over plain loopback, which is most of the usage.
+            secure = ("; Secure"
+                      if self.headers.get("X-Forwarded-Proto") == "https"
+                      else "")
             self._send(b'{"ok":true}', "application/json",
-                       cookie=f"sa_session={sid}; Path=/; HttpOnly; "
-                              "SameSite=Strict; Max-Age=86400")
+                       cookie=f"{COOKIE}={sid}; Path=/; HttpOnly; "
+                              f"SameSite=Strict; Max-Age={SESSION_SECONDS}"
+                              f"{secure}")
             return
 
         self.send_error(404)
@@ -1436,27 +1533,70 @@ def snapshot(db: Path, run: str | None = None) -> str:
 
 
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+ANY_ADDR = {"0.0.0.0", "::", ""}
+
+#: Shorter than this and a lockout is the only thing standing between the token
+#: and a dictionary. 16 characters of anything reasonable is far past the point
+#: where 10 guesses a minute matters.
+MIN_TOKEN = 16
+
+
+def new_token() -> str:
+    """A token nobody has to think about. 32 bytes, URL-safe."""
+    return secrets.token_urlsafe(32)
 
 
 def serve(db: Path | list[Path], *, host: str = "127.0.0.1", port: int = 8787,
-          open_browser: bool = True, token: str | None = None) -> None:
+          open_browser: bool = True, token: str | None = None,
+          allow_host: list[str] | None = None) -> None:
     """Serve one or more project databases.
 
-    Refuses to bind off-loopback without a token. That refusal is the whole
-    security design: the dashboard exposes unit names, notes and machine names,
-    it has no TLS, and the easiest mistake in the world is to pass
-    `--host 0.0.0.0` once and forget. Making that combination impossible is
-    worth more than any amount of documentation saying not to.
+    Two refusals, and they are the security design:
+
+    **Off-loopback without a token is refused.** The dashboard exposes unit
+    names, notes and machine names, it has no TLS, and the easiest mistake in
+    the world is to pass `--host 0.0.0.0` once and forget.
+
+    **A short token is refused.** `--token abc` used to be accepted, and the
+    only thing between it and a dictionary was a `sleep(0.5)` that a threaded
+    server made meaningless -- 95 wrong guesses a second, measured. A token
+    that is not worth typing is not worth having.
+
+    And the `Host` header is checked against the names this server actually
+    answers to, which is what stops a page you visit from reading a loopback
+    dashboard by rebinding its own DNS to 127.0.0.1.
     """
     projects = _projects(db)
     if host not in LOOPBACK and not token:
         raise SystemExit(
-            f"refusing to bind {host} without --token.\n"
+            f"refusing to bind {host} without a token.\n"
             "  This serves queue contents and machine names over plain HTTP.\n"
-            "  Either keep it on 127.0.0.1, or set a token:\n"
-            "      fleetwright dashboard --host 0.0.0.0 --token \"$(openssl rand -hex 24)\"")
+            "  Either keep it on 127.0.0.1, or set one:\n"
+            f"      fleetwright dashboard --host {host} --token auto\n"
+            "  Better still, leave it on loopback and tunnel:\n"
+            f"      ssh -N -L {port}:127.0.0.1:{port} you@that-machine")
+    if token and len(token) < MIN_TOKEN:
+        raise SystemExit(
+            f"that token is {len(token)} characters; {MIN_TOKEN} is the "
+            f"minimum.\n"
+            "  A short token is guessable, and a lockout is a speed bump "
+            "rather than a wall.\n"
+            "      fleetwright dashboard --token auto        # generated for you\n"
+            "      export FLEETWRIGHT_TOKEN=\"$(openssl rand -hex 24)\"")
+
+    # The names this server will answer to. Empty means "cannot know", which
+    # happens when bound to every interface with no --allow-host: the
+    # legitimate Host is then whatever a proxy passes, and guessing would lock
+    # out the real user rather than the attacker.
+    allowed = {h.lower() for h in (allow_host or [])}
+    if host in LOOPBACK:
+        allowed |= {"127.0.0.1", "localhost", "::1", "[::1]"}
+    elif host not in ANY_ADDR:
+        allowed |= {host.lower(), "127.0.0.1", "localhost"}
+
     handler = type("Handler", (_Handler,), {
-        "projects": projects, "token": token, "sessions": {}})
+        "projects": projects, "token": token, "sessions": {},
+        "allowed_hosts": frozenset(allowed), "failures": {}})
     with ThreadingHTTPServer((host, port), handler) as httpd:
         shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
         url = f"http://{shown}:{port}"
@@ -1464,6 +1604,11 @@ def serve(db: Path | list[Path], *, host: str = "127.0.0.1", port: int = 8787,
         print(f"  projects: {', '.join(projects)}")
         if token:
             print("  access token required")
+        if allowed:
+            print(f"  answers to: {', '.join(sorted(allowed))}")
+        else:
+            print("  WARNING: not checking the Host header, because bound to "
+                  "every interface with no --allow-host.")
         if host not in LOOPBACK:
             # Said every time, not once in a README. There is no TLS here.
             print(f"  WARNING: bound to {host} over plain HTTP — the token and "

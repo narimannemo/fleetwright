@@ -279,3 +279,89 @@ s["eta_seconds"]     # None when nothing is left or nothing has finished
 
 Use it to fail a build, page someone, or print a line at the end of a run —
 the dashboard is one consumer of this, not the only one.
+
+## Access, and what it is actually protecting against
+
+There are no user accounts. There is one shared token, because this is a
+console you point at your own work, and inventing accounts would be pretending
+to an identity system that does not exist. What follows is what that does and
+does not buy you.
+
+### Running it on your own machine
+
+The default binds `127.0.0.1` with no token, and that is the right default. Two
+things make it safe enough, and one thing does not.
+
+**The `Host` header is checked.** This is the part people leave out, and it is
+the one that matters. A page you visit at `evil.com` cannot normally read
+`http://127.0.0.1:8787` because the browser blocks the cross-origin read. But
+`evil.com` can publish a one-second DNS TTL, serve you a page, and re-resolve
+its own name to `127.0.0.1`. The browser then believes the origin *is*
+`evil.com`, same-origin is satisfied, and the page reads your fleet: unit
+names, notes, results, worker names, and whatever paths you put in `meta`. The
+browser cannot detect this. The server can, because the `Host` header says
+`evil.com` and this server knows it is not called that. So it answers `421`.
+
+**Loopback is not a user boundary.** On a machine with other people or other
+accounts on it, anyone who can open a socket can read the dashboard. If that
+describes your machine, set a token:
+
+```bash
+export FLEETWRIGHT_TOKEN="$(openssl rand -hex 24)"
+```
+
+### Running it on a server
+
+**Do not put it on a network in plain HTTP.** It refuses `--host 0.0.0.0`
+without a token, but a token over plain HTTP is a token typed into a form and
+sent in the clear, which is worse than no token because it feels like
+protection. The two right answers, in order:
+
+**An SSH tunnel, which needs no configuration and no certificate:**
+
+```bash
+# on the server: leave it where it is
+fleetwright dashboard --db work.db
+
+# on your laptop
+ssh -N -L 8787:127.0.0.1:8787 you@that-machine
+# then open http://127.0.0.1:8787
+```
+
+The dashboard never leaves loopback, the traffic is encrypted by ssh, and
+authentication is the ssh key you already have. This is the recommendation.
+
+**A reverse proxy terminating TLS**, if several people need it:
+
+```bash
+fleetwright dashboard --token-file /etc/fleetwright/token \
+  --allow-host fleet.example.com
+```
+
+`--allow-host` is required here: behind a proxy the legitimate `Host` is
+whatever the proxy passes, so without being told, the server cannot tell that
+name from an attacker's. Have the proxy set `X-Forwarded-Proto: https`, and the
+session cookie is issued with `Secure`.
+
+### The token
+
+- **16 characters minimum, refused below that.** `--token abc` used to be
+  accepted, and the only thing between it and a dictionary was a half-second
+  sleep on a wrong guess. That sleep did nothing: the server is threaded, so it
+  delayed one connection while sixty others ran beside it. Measured, 200 wrong
+  guesses took 2.1 seconds.
+- **Ten wrong guesses from one address locks it out for a minute.** That is the
+  real limit, and it is what makes guessing pointless rather than merely slow.
+- **`--token auto`** generates one and prints it, so nobody has to invent one.
+- **Prefer `--token-file` or `FLEETWRIGHT_TOKEN`** over `--token`. A flag lands
+  in your shell history and in `ps` output for every other user on the machine.
+- Compared with `hmac.compare_digest`, so a wrong token takes the same time to
+  reject whichever character is wrong.
+
+### What is deliberately not here
+
+No TLS, no accounts, no roles, no audit log. A tool that ships its own
+half-implemented crypto is worse than one that says plainly: put it behind ssh
+or a proxy that does this properly. The snapshot from `--out` has no access
+control at all, by design, because it is a file: whoever can read the file can
+read the fleet.
