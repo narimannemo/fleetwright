@@ -3741,3 +3741,55 @@ class TestDashboardAuthHardening:
         assert "compare_digest" in src
         assert "given == self.token" not in src
 
+
+class TestPromptNamesTheRealDatabase:
+
+    def test_the_prompt_carries_an_absolute_path(self, tmp_path):
+        """A worker prompt is pasted into agents that run from anywhere, so a
+        relative `--db work.db` is a worker quietly making its own queue."""
+        db = tmp_path / "work.db"
+        cli_main(["define", "k", "--db", str(db), "--instructions", "i",
+                  "--done-when", "d"])
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["prompt", "k", "--db", str(db)])
+        out = buf.getvalue()
+        assert str(db.resolve()) in out
+        assert "--db work.db" not in out
+
+
+class TestMetaIsRendered:
+    """`--meta '{"path": "scans/$name.txt"}'` is the documented way to give a
+    unit its file, and the worker used to get the TEMPLATE back."""
+
+    def _claimed(self, tmp_path):
+        conn = sa.connect(str(tmp_path / "w.db"))
+        sa.define(conn, "k", "Read $path", done_when="d")
+        sa.add(conn, "k", ["p01"], meta={"path": "scans/$name.txt", "n": 7})
+        return conn, sa.claim(conn, "k", worker="w")[0]
+
+    def test_a_worker_reading_meta_gets_the_value_not_the_template(self, tmp_path):
+        conn, u = self._claimed(tmp_path)
+        assert u.meta["path"] == "scans/p01.txt", u.meta
+
+    def test_the_brief_shows_the_value(self, tmp_path):
+        conn, u = self._claimed(tmp_path)
+        assert "path: scans/p01.txt" in u.brief()
+        assert "$name" not in u.brief()
+
+    def test_non_strings_are_left_alone(self, tmp_path):
+        conn, u = self._claimed(tmp_path)
+        assert u.meta["n"] == 7
+
+    def test_the_instructions_still_substitute(self, tmp_path):
+        conn, u = self._claimed(tmp_path)
+        assert u.instructions == "Read scans/p01.txt"
+
+    def test_the_row_keeps_the_template(self, tmp_path):
+        """Rendered on the way out, never in the row: the stored value should
+        say what was meant, not what one unit happened to get."""
+        conn, u = self._claimed(tmp_path)
+        raw = json.loads(conn.execute("SELECT meta FROM unit").fetchone()[0])
+        assert raw["path"] == "scans/$name.txt"

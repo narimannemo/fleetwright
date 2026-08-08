@@ -571,19 +571,28 @@ def spec(conn: sqlite3.Connection, kind: str) -> dict | None:
 
 def _to_unit(r: sqlite3.Row, spec_row: sqlite3.Row | None = None,
              pinned=()) -> Unit:
-    meta = json.loads(r["meta"] or "{}")
+    stored = json.loads(r["meta"] or "{}")
+    # Substitute into the VALUES too, not only into the instructions. `--meta
+    # '{"path": "scans/$name.txt"}'` is the documented way to give a unit its
+    # file, and the worker was handed the template back: the brief printed
+    # `path: scans/$name` and `claim --json` returned the same, so anything
+    # reading meta programmatically got a literal dollar sign. Rendered on the
+    # way OUT, never in the row, so the template stays re-renderable and the
+    # stored value keeps saying what was meant rather than what one unit got.
+    meta = {k: (_render(v, r["name"], stored) if isinstance(v, str) else v)
+            for k, v in stored.items()}
     sp = spec_row or {}
     return Unit(r["unit_id"], r["kind"], r["name"], r["attempts"],
                 r["leased_until"] or 0.0, meta,
-                _render(sp["instructions"] if sp else "", r["name"], meta),
-                _render(sp["done_when"] if sp else "", r["name"], meta),
-                _render(sp["returns"] if sp else "", r["name"], meta),
-                _render(sp["tools"] if sp else "", r["name"], meta),
+                _render(sp["instructions"] if sp else "", r["name"], stored),
+                _render(sp["done_when"] if sp else "", r["name"], stored),
+                _render(sp["returns"] if sp else "", r["name"], stored),
+                _render(sp["tools"] if sp else "", r["name"], stored),
                 tuple(json.loads(sp["skills"])) if sp and sp["skills"] else (),
                 tuple(pinned) if pinned else (
                     tuple(json.loads(r["skills_used"])) if r["skills_used"] else ()),
                 json.loads(sp["mcp"]) if sp and sp["mcp"] else None,
-                _render(sp["context"] if sp else "", r["name"], meta),
+                _render(sp["context"] if sp else "", r["name"], stored),
                 r["lease_token"] or "")
 
 

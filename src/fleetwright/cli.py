@@ -260,7 +260,11 @@ def _cmd_prompt(a: argparse.Namespace) -> int:
         if a.n > 1:
             print(f"{'=' * 30} worker {i} of {a.n} {'=' * 30}")
         print(leases.worker_prompt(
-            conn, a.kind, db=a.db, lease=a.lease,
+            # The RESOLVED path, not the string that was typed. This prompt is
+            # pasted into agents that may run from anywhere, and `--db work.db`
+            # from the wrong directory is how a worker ends up creating its own
+            # empty queue and reporting nothing to do.
+            conn, a.kind, db=str(resolve_db(a).resolve()), lease=a.lease,
             # Only suffix a name the caller actually chose. Defaulting to
             # "agent" and printing `--worker agent-1` for a single worker is
             # how eight spawned workers all ended up called agent-1.

@@ -5,6 +5,26 @@ release workflow reads the section matching the tag and fails if there isn't
 one — release notes generated from commit subjects tell a reader what changed
 and never why.
 
+## [0.24.0] — 2026-08-08
+
+Both found by setting the tool up in an empty repository from scratch, which
+is a thing I had never actually done end to end.
+
+### Fixed
+
+- **A worker was handed the `meta` TEMPLATE, not the value.** `--meta
+  '{"path": "scans/$name.txt"}'` is the documented way to give a unit its
+  file. The instructions were rendered correctly, but the meta itself was not:
+  the brief printed `path: scans/$name` and `claim --json` returned the same,
+  so anything reading `meta["path"]` programmatically got a literal dollar
+  sign. Rendered on the way out now, never in the row, so the stored value
+  still says what was meant rather than what one unit got.
+- **`prompt` printed `--db work.db`** even when the database is somewhere
+  else. It resolved correctly by luck, because that string is also the
+  default; but a worker prompt is pasted into agents that run from anywhere,
+  and a relative path is how a worker quietly creates its own empty queue. It
+  now prints the resolved absolute path.
+
 ## [0.23.0] — 2026-08-08
 
 Authentication, looked at properly rather than assumed. Everything below was
